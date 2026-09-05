@@ -5,7 +5,13 @@ import { useRouter } from "next/navigation";
 import { DevWrappedStats } from "@/types/github";
 import { Search, Share2, ArrowRight } from "lucide-react";
 
-export function NavBar({ stats }: { stats: DevWrappedStats}) {
+interface NavBarProps {
+    stats: DevWrappedStats;
+    onExport: () => void;
+    isExporting: boolean;
+}
+
+export function NavBar({ stats, onExport, isExporting }: NavBarProps) {
     const router = useRouter();
     const [searchQuery, setSearchQuery] = useState('');
 
@@ -15,23 +21,6 @@ export function NavBar({ stats }: { stats: DevWrappedStats}) {
             router.push(`/${encodeURIComponent(searchQuery)}`);
         }
     };
-
-    function exportReport() {
-        const report = `DEVWRAPPED // 2026\n${stats.user.name} (${stats.user.login})\n\n` +
-            `${stats.overview.totalContributions} contributions | `+
-            `${stats.overview.totalCommits} commits | `+
-            `${stats.overview.totalPRsCreated} PRs created | `+
-            `Longest streak: ${stats.streak.longestStreak} days | `+
-            `Current streak: ${stats.streak.currentStreak} days | ` +
-            `Merge rate: ${stats.pullRequests.mergeRate}%`;
-        const blob = new Blob([report], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `${stats.user.login}_devwrapped_report.txt`;
-        anchor.click();
-        URL.revokeObjectURL(url);
-    }
 
     return (
         <nav className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-center sm:justify-between sm:gap-5">
@@ -54,10 +43,11 @@ export function NavBar({ stats }: { stats: DevWrappedStats}) {
                 </form>
 
                 <button
-                onClick={exportReport}
-                className="group flex h-9 items-center justify-center gap-2 border border-border px-3 font-mono text-[10px] uppercase tracking-[0.12em] transition-all hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:shadow-[0_0_18px_rgba(16,185,129,0.12)] cursor-pointer"
+                    onClick={onExport}
+                    disabled={isExporting}
+                    className="group flex h-9 items-center justify-center gap-2 border border-border px-3 font-mono text-[10px] uppercase tracking-[0.12em] transition-all hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:shadow-[0_0_18px_rgba(16,185,129,0.12)] cursor-pointer"
                 >
-                <Share2 size={13} aria-hidden="true" /> Export report <ArrowRight size={13} className="transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
+                    <Share2 size={13} aria-hidden="true" /> {isExporting ? 'Exporting...' : 'Export PNG'} <ArrowRight size={13} className="transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
                 </button>
             </div>
         </nav>
