@@ -18,11 +18,11 @@ export default function WrappedUserPage({ params }: { params: Promise<{ username
             try {
                 setLoading(true);
                 const res = await fetch('/api/wrapped/' + encodeURIComponent(username));
-                const data = await res.json();
+                const json = await res.json();
                 if (!res.ok) {
-                    throw new Error(data.error || 'Failed to retrieve user stats');
+                    throw new Error(json.error || 'Failed to retrieve user stats');
                 }
-                setStats(data.data);
+                setStats(json.data);
                 setError(null);
             } catch (err) {
                 setError(err instanceof Error ? err.message : 'An unknown error occurred');
