@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 import { DevWrappedStats } from "@/types/github";
-
-export const runtime = "edge";
+import { fetchRawGithubData } from "@/lib/github";
+import { processGithubMetrics } from "@/lib/metrics";
 
 export async function GET(
     request: Request,
@@ -11,16 +11,13 @@ export async function GET(
     const username = resolvedParams.username;
 
     try {
-        //  Fetch stats internally from the API route
-        const { origin } = new URL(request.url);
-        const res = await fetch(`${origin}/api/wrapped/${username}`);
-        const json = await res.json();
+        const res = await fetchRawGithubData(username);
 
-        if (!res.ok || !json.data) {
+        if (!res) {
             throw new Error('User stats unavailable');
         }
 
-        const stats: DevWrappedStats = json.data;
+        const stats: DevWrappedStats = processGithubMetrics(res);
 
         return new ImageResponse(
             (
