@@ -8,7 +8,9 @@ const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono'
 export const metadata: Metadata = {
   title: 'DevWrapped // 2026',
   description: 'Your annual engineering activity audit.',
-  generator: 'v0.app',
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_APP_URL || "https://dev-wrap.onrender.com"
+  ),
 }
 
 export const viewport: Viewport = {
