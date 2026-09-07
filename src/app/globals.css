@@ -21,8 +21,8 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-emerald: var(--emerald);
-  --font-sans: 'Geist', 'Geist Fallback', sans-serif;
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback', monospace;
+  --font-sans: "Geist", "Geist Fallback", sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", monospace;
 }
 
 :root {
