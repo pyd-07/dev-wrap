@@ -67,21 +67,21 @@ EditorialDasboard
 | `src/lib/metrics.ts` | Converts raw GitHub data into application metrics |
 | `src/lib/redis.ts` | Shared ioredis connection and environment-based connection settings |
 | `src/types/github.ts` | Raw GraphQL and processed metric TypeScript contracts |
-| `src/components/editorial-dasboard.tsx` | Dashboard composition and PNG export |
+| `src/components/editorial-dashboard.tsx` | Dashboard composition and PNG export |
 | `src/components/dashboard/*` | Individual dashboard cards and navigation |
 | `next.config.ts` | Enables the React compiler and standalone production output |
 | `Dockerfile` | Multi-stage production image |
-| `docker-compose.yml` | Local/compose deployment with web + Redis services |
+| `docker-compose.yml` | Local/compose deployment with web + Go engine + Redis services |
 
 ## Server/client boundary
 
-The GitHub token is used only by server-side code in `src/lib/github.ts`. The browser never receives that token. The dynamic user page is a client component because it needs browser-side loading state and makes the request to the API route.
+The GitHub token is used only by the Go worker engine (`go-engine/infra/github_client.go`) and is never sent to the browser. The dynamic user page is a client component because it needs browser-side loading state and makes the request to the API route.
 
 The dashboard is also a client component because PNG generation requires access to the DOM through `html-to-image`.
 
 ## GitHub data collection
 
-`src/lib/github.ts` uses `@octokit/graphql` and a single GraphQL query. The query requests:
+The Go engine (`go-engine/infra/github_client.go`) performs a single GitHub v4 GraphQL query. The query requests:
 
 - profile identity and biography
 - follower/following counts
@@ -95,7 +95,7 @@ The dashboard is also a client component because PNG generation requires access 
 - up to 50 owned, non-fork repositories
 - the five largest language edges returned for each repository
 
-The code requires `GITHUB_TOKEN` to be present and uses it to authenticate a bearer-token GraphQL request.
+The engine requires `GITHUB_TOKEN` to be present and uses it to authenticate a bearer-token GraphQL request.
 
 ## Metric processing
 

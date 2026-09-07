@@ -50,10 +50,9 @@ The server authenticates to GitHub with `GITHUB_TOKEN`. Redis is treated as a be
 
 - Next.js 16 App Router
 - React 19 + TypeScript
-- GitHub GraphQL API via `@octokit/graphql`
-- Redis via `ioredis`
+- Go worker engine (`shurcooL/githubv4`) for GitHub GraphQL audits
+- Redis via `ioredis` (Next.js) and `go-redis/v9` (engine)
 - Tailwind CSS 4
-- Recharts and Framer Motion for UI presentation
 - `html-to-image` for dashboard PNG export
 - Docker / Docker Compose for containerized execution
 
