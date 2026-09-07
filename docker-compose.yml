@@ -12,10 +12,26 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: always
   
-  # Service 2: Local Redis Cache (fallback or local testing)
+  # Service 2: Go Ingestion Engine
+  engine:
+    build:
+      context: ./go-engine
+      dockerfile: Dockerfile
+    container_name: devwrap-engine
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - QUEUE_NAME=queue:github-audit
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+
+  # Service 3: Local Redis Cache (fallback or local testing)
   redis:
     image: redis:7-alpine
     container_name: devwrap-redis
@@ -23,6 +39,12 @@ services:
       - 6379:6379
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
     restart: always
   
 volumes:
