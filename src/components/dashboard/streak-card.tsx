@@ -10,6 +10,13 @@ function Eyebrow({ children }: { children: React.ReactNode }) {
 }
 
 export function StreakCard({ streak }: { streak: StreakMetric }) {
+  // Older cached reports do not have daily points yet; do not invent a chart.
+  const chartDays = (streak.contributions ?? []).slice(-28);
+  const maxDailyContributions = Math.max(
+    1,
+    ...chartDays.map((day) => day.count),
+  );
+
   return (
     <section className="border border-border bg-card p-4 sm:p-8 transition-all duration-300 hover:-translate-y-0.5 hover:border-zinc-700 hover:bg-[#16161a]">
       <div className="flex items-start justify-between">
@@ -49,15 +56,48 @@ export function StreakCard({ streak }: { streak: StreakMetric }) {
           <span>{streak.totalContributions} units</span>
         </div>
 
-        <div className="flex items-end space-x-1 h-12 pt-2">
-          {Array.from({ length: 40 }).map((_, i) => (
-            <div
-              key={i}
-              className="flex-1 rounded-t-sm bg-emerald-500/20 hover:bg-emerald-400 transition"
-              style={{ height: `${Math.max(15, (i * 7 + 13) % 100)}%` }}
-            />
-          ))}
-        </div>
+        {chartDays.length > 0 ? (
+          <>
+            <svg
+              viewBox="0 0 280 64"
+              className="h-16 w-full overflow-visible"
+              role="img"
+              aria-label="Daily contributions for the last 28 days"
+            >
+              <title>Daily contributions for the last 28 days</title>
+              <line x1="0" x2="280" y1="63.5" y2="63.5" stroke="currentColor" opacity="0.2" />
+              {chartDays.map((day, index) => {
+                const height = day.count === 0
+                  ? 2
+                  : Math.max(4, (day.count / maxDailyContributions) * 60);
+                const x = index * 10 + 1;
+
+                return (
+                  <g key={day.date}>
+                    <title>{`${day.date}: ${day.count} contribution${day.count === 1 ? "" : "s"}`}</title>
+                    <rect
+                      x={x}
+                      y={63 - height}
+                      width="8"
+                      height={height}
+                      rx="1"
+                      className={day.count > 0 ? "fill-emerald-500" : "fill-zinc-800"}
+                    />
+                  </g>
+                );
+              })}
+            </svg>
+            <div className="mt-2 flex justify-between font-mono text-[10px] text-muted-foreground">
+              <span>{chartDays[0].date}</span>
+              <span>Last 28 days</span>
+              <span>{chartDays.at(-1)?.date}</span>
+            </div>
+          </>
+        ) : (
+          <p className="py-5 text-xs text-muted-foreground">
+            Daily contribution data will appear after the next audit.
+          </p>
+        )}
       </div>
     </section>
   );

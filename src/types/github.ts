@@ -11,6 +11,12 @@ export interface StreakMetric {
   currentStreak: number;
   longestStreak: number;
   totalContributions: number;
+  contributions: ContributionDayMetric[];
+}
+
+export interface ContributionDayMetric {
+  date: string;
+  count: number;
 }
 
 export interface PRMetric {
@@ -19,6 +25,12 @@ export interface PRMetric {
   closed: number;
   open: number;
   mergeRate: number;
+  mergedOrganizations: MergedOrganizationMetric[];
+}
+
+export interface MergedOrganizationMetric {
+  login: string;
+  count: number;
 }
 
 export interface DevWrappedStats {

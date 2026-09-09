@@ -15,19 +15,24 @@ type RedisRepository struct {
 	client *redis.Client
 }
 
-// NewRedisRepository accepts either a bare host:port or a redis:// URL.
-// docker-compose passes REDIS_URL=redis:6379, but a redis://host:port URL
-// would previously be fed to go-redis as Addr verbatim and never connect.
+// NewRedisRepository accepts a redis:// or rediss:// URL (Render Key Value
+// hands out rediss:// and requires TLS) or a bare host:port such as the
+// REDIS_URL=redis:6379 that docker-compose passes.
 func NewRedisRepository(addr string) (*RedisRepository, error) {
-	if u, err := url.Parse(addr); err == nil && u.Scheme == "redis" {
-		addr = u.Host
+	var opts *redis.Options
+	if u, err := url.Parse(addr); err == nil && (u.Scheme == "redis" || u.Scheme == "rediss") {
+		parsed, parseErr := redis.ParseURL(addr)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid REDIS_URL %q: %w", addr, parseErr)
+		}
+		opts = parsed
+	} else {
+		opts = &redis.Options{Addr: addr}
 	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr: addr,
-	})
+	client := redis.NewClient(opts)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {

@@ -41,28 +41,43 @@ type LanguageMetric struct {
 
 // StreakMetric mirrors TypeScript StreakMetric
 type StreakMetric struct {
-	CurrentStreak      int `json:"currentStreak"`
-	LongestStreak      int `json:"longestStreak"`
-	TotalContributions int `json:"totalContributions"`
+	CurrentStreak      int                     `json:"currentStreak"`
+	LongestStreak      int                     `json:"longestStreak"`
+	TotalContributions int                     `json:"totalContributions"`
+	Contributions      []ContributionDayMetric `json:"contributions"`
+}
+
+// ContributionDayMetric is one day from GitHub's contribution calendar.
+type ContributionDayMetric struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
 }
 
 // PRMetric mirrors TypeScript PRMetric
 type PRMetric struct {
-	Total     int     `json:"total"`
-	Merged    int     `json:"merged"`
-	Closed    int     `json:"closed"`
-	Open      int     `json:"open"`
-	MergeRate float64 `json:"mergeRate"`
+	Total               int                        `json:"total"`
+	Merged              int                        `json:"merged"`
+	Closed              int                        `json:"closed"`
+	Open                int                        `json:"open"`
+	MergeRate           float64                    `json:"mergeRate"`
+	MergedOrganizations []MergedOrganizationMetric `json:"mergedOrganizations"`
+}
+
+// MergedOrganizationMetric is an exact count of a user's merged pull requests
+// targeting repositories owned by one organization.
+type MergedOrganizationMetric struct {
+	Login string `json:"login"`
+	Count int    `json:"count"`
 }
 
 // DevWrappedStats matches TypeScript DevWrappedStats exactly
 type DevWrappedStats struct {
-	User         UserProfile     `json:"user"`
-	Overview     OverviewMetrics `json:"overview"`
+	User         UserProfile      `json:"user"`
+	Overview     OverviewMetrics  `json:"overview"`
 	Languages    []LanguageMetric `json:"languages"`
-	Streak       StreakMetric    `json:"streak"`
-	PullRequests PRMetric        `json:"pullRequests"`
-	FetchedAt    string          `json:"fetchedAt"`
+	Streak       StreakMetric     `json:"streak"`
+	PullRequests PRMetric         `json:"pullRequests"`
+	FetchedAt    string           `json:"fetchedAt"`
 }
 
 // AuditRepository contract for persistence and lock management

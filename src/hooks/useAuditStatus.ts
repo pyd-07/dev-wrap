@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DevWrappedStats } from '@/types/github';
 
 export type AuditStatus = 'IDLE' | 'ENQUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
@@ -11,17 +11,32 @@ interface StatusPayload {
   data?: unknown;
 }
 
+// Adaptive polling: fast checks while the job is likely young, progressively
+// slower once it drags on, and a hard ceiling so a wedged job can never pin a
+// browser to an endless poll loop.
+const INITIAL_POLL_MS = 800;
+const MAX_POLL_MS = 5000;
+const POLL_BACKOFF_FACTOR = 1.5;
+const AUDIT_TIMEOUT_MS = 90_000;
+
 export function useAuditStatus() {
   const [status, setStatus] = useState<AuditStatus>('IDLE');
   const [data, setData] = useState<DevWrappedStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeUsername, setActiveUsername] = useState<string | null>(null);
+  const [completedUsername, setCompletedUsername] = useState<string | null>(null);
+  const submissionControllerRef = useRef<AbortController | null>(null);
 
   const startAudit = useCallback(async (username: string) => {
     const handle = username.trim().toLowerCase();
     if (!handle) return;
 
+    submissionControllerRef.current?.abort();
+    const controller = new AbortController();
+    submissionControllerRef.current = controller;
+
     setActiveUsername(handle);
+    setCompletedUsername(null);
     setStatus('ENQUEUED');
     setError(null);
     setData(null);
@@ -31,6 +46,7 @@ export function useAuditStatus() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: handle }),
+        signal: controller.signal,
       });
 
       const initData = await res.json();
@@ -39,8 +55,13 @@ export function useAuditStatus() {
         throw new Error(initData.error || initData.message || 'Failed to initialize audit');
       }
 
-      setStatus('PROCESSING');
+      if (submissionControllerRef.current === controller) {
+        setStatus('PROCESSING');
+      }
     } catch (err: unknown) {
+      if (controller.signal.aborted || submissionControllerRef.current !== controller) {
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Error submitting audit job';
       setStatus('FAILED');
       setError(message);
@@ -55,9 +76,12 @@ export function useAuditStatus() {
 
     let isSubscribed = true;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
+    const deadline = Date.now() + AUDIT_TIMEOUT_MS;
 
     const stopPolling = () => {
       isSubscribed = false;
+      controller.abort();
       if (pollTimer) {
         clearTimeout(pollTimer);
         pollTimer = null;
@@ -71,9 +95,11 @@ export function useAuditStatus() {
       setActiveUsername(null); // Reset state so the effect unbinds cleanly
     };
 
-    const checkStatus = async () => {
+    const checkStatus = async (intervalMs: number) => {
       try {
-        const res = await fetch(`/api/audit/status/${activeUsername}`);
+        const res = await fetch(`/api/audit/status/${activeUsername}`, {
+          signal: controller.signal,
+        });
 
         // Guard against non-JSON bodies (e.g. HTML 502 pages from a proxy)
         let statusPayload: StatusPayload;
@@ -88,6 +114,7 @@ export function useAuditStatus() {
         if (statusPayload.status === 'COMPLETED') {
           stopPolling();
           setData((statusPayload.data as DevWrappedStats) ?? null);
+          setCompletedUsername(activeUsername);
           setStatus('COMPLETED');
           setActiveUsername(null); // Terminal: stop further polling
           return;
@@ -100,18 +127,31 @@ export function useAuditStatus() {
           return;
         }
 
-        // Still ENQUEUED/PROCESSING — schedule the next poll only while subscribed
-        if (isSubscribed) {
-          pollTimer = setTimeout(checkStatus, 1200);
+        // Hard ceiling: no successful poll within the window means the job is
+        // wedged (or the worker died). Give up instead of polling forever.
+        if (Date.now() >= deadline) {
+          fail('Audit timed out. The worker may be down — try again shortly.');
+          return;
         }
-      } catch {
+
+        // Still ENQUEUED/PROCESSING — back off before the next poll so long
+        // audits don't spam the status endpoint, rescheduling only while
+        // subscribed.
         if (isSubscribed) {
+          const nextInterval = Math.min(
+            Math.round(intervalMs * POLL_BACKOFF_FACTOR),
+            MAX_POLL_MS,
+          );
+          pollTimer = setTimeout(() => checkStatus(nextInterval), intervalMs);
+        }
+      } catch (err) {
+        if (isSubscribed && !(err instanceof DOMException && err.name === 'AbortError')) {
           fail('Polling connection error');
         }
       }
     };
 
-    pollTimer = setTimeout(checkStatus, 800);
+    pollTimer = setTimeout(() => checkStatus(INITIAL_POLL_MS), INITIAL_POLL_MS);
 
     // Handle switch or unmount: kill the pending timer before it can reschedule
     return () => {
@@ -119,5 +159,5 @@ export function useAuditStatus() {
     };
   }, [activeUsername, status]);
 
-  return { status, data, error, startAudit };
+  return { status, data, error, startAudit, completedUsername };
 }

@@ -32,10 +32,10 @@ type GraphQLQuery struct {
 		}
 		Repositories struct {
 			Nodes []struct {
-				Name             githubv4.String
-				StargazerCount   githubv4.Int
-				IsFork           githubv4.Boolean
-				Languages        struct {
+				Name           githubv4.String
+				StargazerCount githubv4.Int
+				IsFork         githubv4.Boolean
+				Languages      struct {
 					Edges []struct {
 						Size githubv4.Int
 						Node struct {
