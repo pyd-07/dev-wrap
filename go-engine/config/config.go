@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	RedisURL 	string
@@ -18,9 +21,14 @@ func LoadConfig() *Config {
 		queueName = "queue:github-audit"
 	}
 
+	workers := 5
+	if v, err := strconv.Atoi(os.Getenv("WORKERS")); err == nil && v > 0 {
+		workers = v
+	}
+
 	return &Config{
 		RedisURL: 	redisURL,
 		QueueName: 	queueName,
-		Workers: 	5,
+		Workers: 	workers,
 	}
 }

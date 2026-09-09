@@ -1,0 +1,57 @@
+# Render Blueprint for DevWrap
+# Deploy with: render blueprint launch  (or connect the repo in the Render dashboard)
+#
+# Services:
+#   - web:    Next.js app (producer + status endpoints + UI)
+#   - worker: Go engine consuming the audit queue (the piece that was missing
+#             on Render before, which is why audits hung and eventually 404'd)
+#   - redis:  Render Key Value (TLS via rediss://)
+
+services:
+  # Next.js web application
+  - type: web
+    name: dev-wrap
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: dev-wrap-redis
+          property: connectionString
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+
+  # Go audit worker engine
+  - type: worker
+    name: dev-wrap-engine
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./go-engine/Dockerfile
+    dockerContext: ./go-engine
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: dev-wrap-redis
+          property: connectionString
+      - key: QUEUE_NAME
+        value: queue:github-audit
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: WORKERS
+        value: "5"
+
+  # Managed Redis (Render Key Value, TLS required)
+  - type: redis
+    name: dev-wrap-redis
+    plan: starter
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
