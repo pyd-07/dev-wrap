@@ -44,7 +44,7 @@ function FeatureCard({
 export default function LandingPage() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
-  const { status, data, error, startAudit } = useAuditStatus();
+  const { status, data, error, startAudit, completedUsername } = useAuditStatus();
 
   // Handle Form Submission: Trigger async audit via hook
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -62,10 +62,10 @@ export default function LandingPage() {
 
   // Auto-navigate to user route once Go engine completes task
   useEffect(() => {
-    if (status === "COMPLETED" && searchQuery.trim()) {
-      router.push(`/${searchQuery.trim().toLowerCase()}`);
+    if (status === "COMPLETED" && completedUsername) {
+      router.push(`/${encodeURIComponent(completedUsername)}`);
     }
-  }, [status, searchQuery, router]);
+  }, [status, completedUsername, router]);
 
   const isProcessing = status === "ENQUEUED" || status === "PROCESSING";
 
@@ -126,7 +126,7 @@ export default function LandingPage() {
             <p className="max-w-xl text-base text-muted-foreground leading-relaxed">
               DevWrapped connects directly to your GitHub activity to calculate
               byte-accurate language breakdowns, 52-week streak consistency
-              matrix, pull request efficiency, and team collaboration velocity.
+              matrix, pull request activity, and team collaboration metrics.
             </p>
 
             {/* Central Search Form */}
@@ -230,14 +230,6 @@ export default function LandingPage() {
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Merge Rate:</span>
-                <span className="text-foreground">
-                  {data?.pullRequests?.mergeRate !== undefined
-                    ? `${data.pullRequests.mergeRate}% Efficiency`
-                    : "60.6% Efficiency"}
-                </span>
-              </div>
-              <div className="flex justify-between">
                 <span className="text-muted-foreground">Longest Streak:</span>
                 <span className="text-foreground">
                   {data?.streak?.longestStreak !== undefined
@@ -285,15 +277,15 @@ export default function LandingPage() {
 
           <FeatureCard>
             <div className="flex items-start justify-between">
-              <Eyebrow>03 / Efficiency</Eyebrow>
+              <Eyebrow>03 / Pull requests</Eyebrow>
               <GitPullRequest size={18} className="text-muted-foreground" />
             </div>
             <h3 className="mt-4 text-lg tracking-[-0.03em]">
-              Pull Request Merge Rate
+              Pull Request Activity
             </h3>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Calculates your pull request merge velocity alongside issue
-              creation and code review contribution ratios.
+              Summarizes pull request, issue, and code review contributions
+              from your GitHub activity.
             </p>
           </FeatureCard>
         </div>

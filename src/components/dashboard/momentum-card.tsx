@@ -15,16 +15,8 @@ export function MomentumCard({
   overview: DevWrappedStats["overview"];
 }) {
   const items = [
-    [
-      String(overview.totalPRsReviewed).padStart(2, "0"),
-      "PRs review provided",
-      "+100%",
-    ],
-    [
-      String(overview.totalIssuesCreated).padStart(2, "0"),
-      "Issues created",
-      "+100%",
-    ],
+    [String(overview.totalPRsReviewed).padStart(2, "0"), "PR reviews provided"],
+    [String(overview.totalIssuesCreated).padStart(2, "0"), "Issues created"],
   ] as const;
 
   return (
@@ -38,22 +30,14 @@ export function MomentumCard({
       </div>
 
       <div className="mt-8 grid divide-y divide-border border-y border-border">
-        {items.map(([value, label, trend]) => (
+        {items.map(([value, label]) => (
           <div key={label} className="flex items-center justify-between py-5">
             <div>
               <div className="text-sm">{label}</div>
-              <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-                Compared to last year
-              </div>
             </div>
-            <div className="flex items-center gap-5">
-              <span className="font-mono text-3xl tracking-[-0.06em]">
-                {value}
-              </span>
-              <span className="font-mono text-[10px] text-emerald-500">
-                {trend}
-              </span>
-            </div>
+            <span className="font-mono text-3xl tracking-[-0.06em]">
+              {value}
+            </span>
           </div>
         ))}
       </div>

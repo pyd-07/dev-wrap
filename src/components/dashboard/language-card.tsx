@@ -10,6 +10,8 @@ function Eyebrow({ children }: { children: React.ReactNode }) {
 }
 
 export function LanguageCard({ languages }: { languages: LanguageMetric[] }) {
+  const topLanguages = languages.slice(0, 6);
+
   const formatBytes = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     const kb = bytes / 1024;
@@ -36,7 +38,7 @@ export function LanguageCard({ languages }: { languages: LanguageMetric[] }) {
         className="mt-10 hidden h-3 w-full overflow-hidden bg-secondary sm:flex"
         aria-label="Language composition chart"
       >
-        {languages.map((language) => (
+        {topLanguages.map((language) => (
           <div
             key={language.name}
             style={{
@@ -49,7 +51,7 @@ export function LanguageCard({ languages }: { languages: LanguageMetric[] }) {
       </div>
 
       <div className="mt-8 flex flex-col gap-4 sm:hidden">
-        {languages.map((language) => (
+        {topLanguages.map((language) => (
           <div
             key={language.name}
             className="grid grid-cols-[5.5rem_1fr_2.5rem] items-center gap-3"
@@ -72,7 +74,7 @@ export function LanguageCard({ languages }: { languages: LanguageMetric[] }) {
       </div>
 
       <div className="mt-8 hidden grid-cols-2 gap-x-6 gap-y-5 sm:grid">
-        {languages.map((language) => (
+        {topLanguages.map((language) => (
           <div key={language.name} className="flex items-start gap-3">
             <span
               className="mt-1.5 size-2 shrink-0 rounded-sm"
