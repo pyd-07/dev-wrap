@@ -193,12 +193,12 @@ Useful Redis commands include:
 ```bash
 redis-cli LLEN queue:github-audit
 redis-cli LLEN queue:github-audit:processing
-redis-cli GET lock:audit/<username>
+redis-cli GET lock:audit:<username>
 redis-cli GET stats:<username>
 redis-cli GET failed:audit:<username>
 ```
 
-Note that the lock key uses a colon between `audit` and the username:
+The lock key uses a colon between `audit` and the username:
 
 ```text
 lock:audit:<username>
