@@ -2,62 +2,145 @@
 
 ## Prerequisites
 
-The project is a Next.js application using TypeScript. The Dockerfile currently builds and runs it on Node.js 22 Alpine.
+DevWrapped consists of a Next.js web application, a Go audit worker, and Redis.
 
-For local development, install a current Node.js release compatible with the repository dependencies and npm. The repository already includes `package-lock.json`, so use `npm ci` for a clean dependency installation.
+For local development, install:
 
-Redis is required for normal local execution because the server module creates an ioredis client. The client defaults to `redis://localhost:6379` when `REDIS_URL` is not supplied.
+- Node.js and npm
+- Go 1.25 for running or modifying the worker
+- Docker, if using the recommended Compose setup
+- A GitHub token for the GraphQL API
+
+The repository includes `package-lock.json` and `go.sum`, so use the lockfiles when installing dependencies.
 
 ## Environment variables
 
-Create a local environment file that is not committed to Git:
+The Next.js process uses:
 
 ```env
 GITHUB_TOKEN=your_github_token
 REDIS_URL=redis://localhost:6379
 ```
 
-`GITHUB_TOKEN` is mandatory for the GitHub GraphQL integration. Without it, requests to the wrapped-data API fail before the GraphQL request is made.
+The Go engine uses:
 
-`REDIS_URL` is optional in the sense that the code has a localhost default, but a reachable Redis instance must still exist if the API route is executed.
-
-Do not expose `GITHUB_TOKEN` in client-side code or `NEXT_PUBLIC_*` variables.
-
-## Install dependencies
-
-```bash
-npm ci
+```env
+GITHUB_TOKEN=your_github_token
+REDIS_URL=redis://localhost:6379
+QUEUE_NAME=queue:github-audit
+WORKERS=5
 ```
 
-## Start Redis locally
+Defaults in the Go engine are:
 
-The simplest development option is Docker:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection |
+| `QUEUE_NAME` | `queue:github-audit` | Audit queue consumed by workers |
+| `WORKERS` | `5` | Number of concurrent worker goroutines |
+| `GITHUB_TOKEN` | none | GitHub GraphQL authentication; required |
 
-```bash
-docker run --name devwrap-redis -p 6379:6379 -d redis:7-alpine
+`REDIS_URL` is only optional syntactically because the code supplies a localhost fallback. A reachable Redis instance is still required for the audit pipeline.
+
+For Docker Compose, the application containers use:
+
+```text
+redis://redis:6379
 ```
 
-Or use the repository's Compose setup:
+because `redis` is the Compose service hostname.
+
+Never expose `GITHUB_TOKEN` through `NEXT_PUBLIC_*` variables or browser code.
+
+## Recommended local setup
+
+The complete application is easiest to run through Docker Compose:
 
 ```bash
 docker compose up --build
 ```
 
-The Compose file starts both the Next.js application and Redis. The web container listens on port `3000` and the Redis container listens on port `6379`.
+This starts:
 
-## Run the Next.js development server
-
-```bash
-npm run dev
+```text
+web     -> Next.js production server -> :3000
+engine  -> Go audit worker
+redis   -> Redis 7                    -> :6379
 ```
 
-Then open:
+The web and engine services wait for Redis to pass its health check before starting.
+
+Open:
 
 ```text
 http://localhost:3000
 ```
 
-The landing page accepts a GitHub username and navigates to `/<username>`.
+Stop the stack with:
+
+```bash
+docker compose down
+```
+
+To remove the persisted Redis volume as well:
+
+```bash
+docker compose down -v
+```
+
+## Running the web application directly
+
+Start Redis first:
+
+```bash
+docker run --name devwrap-redis -p 6379:6379 -d redis:7-alpine
+```
+
+Install dependencies:
+
+```bash
+npm ci
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+The Next.js development server listens on port `3000` by default.
+
+## Running the Go engine directly
+
+The worker lives under `go-engine/`.
+
+Install/download Go dependencies:
+
+```bash
+cd go-engine
+go mod download
+```
+
+Run the worker:
+
+```bash
+go run .
+```
+
+With the default local environment, the worker connects to `redis://localhost:6379` and listens to `queue:github-audit` with five workers.
+
+To run a different number of workers:
+
+```bash
+WORKERS=2 go run .
+```
+
+On Windows PowerShell, set the variable before running the command instead:
+
+```powershell
+$env:WORKERS="2"
+go run .
+```
 
 ## Useful npm scripts
 
@@ -68,81 +151,122 @@ The landing page accepts a GitHub username and navigates to `/<username>`.
 | `npm run start` | Serve the production build |
 | `npm run lint` | Run ESLint |
 
-There is currently no dedicated automated test script in `package.json`.
+There is currently no dedicated automated test script in the root `package.json`.
 
-## Application routes
+For Go code, use the standard Go tooling:
 
-### Landing page
-
-```text
-GET /
+```bash
+cd go-engine
+go test ./...
+go build ./...
 ```
 
-Implemented in `src/app/page.tsx`.
+## Application flow during development
 
-The form lowercases the entered handle and navigates to the dynamic user route. The page also includes quick-select handles for demos.
+A normal audit follows this sequence:
 
-### User dashboard
+1. The landing page calls `POST /api/audit`.
+2. Next.js validates the username and acquires `lock:audit:<username>`.
+3. Next.js pushes a JSON job to `queue:github-audit`.
+4. The Go worker moves the job to `queue:github-audit:processing`.
+5. The worker fetches GitHub data and calculates `DevWrappedStats`.
+6. The worker stores the result in `stats:<username>` for 24 hours and releases the lock.
+7. The browser polls `GET /api/audit/status/<username>` until it receives `COMPLETED`.
+8. The browser navigates to `/<username>`, where the server reads the completed report from Redis.
+
+If the worker is not running, the audit request can still be accepted into Redis, but it will remain unprocessed until a worker consumes it. The browser eventually stops polling after its 90-second timeout.
+
+## Redis inspection
+
+When debugging the pipeline, inspect these keys:
 
 ```text
-GET /<username>
+lock:audit:<username>
+queue:github-audit
+queue:github-audit:processing
+stats:<username>
+failed:audit:<username>
 ```
 
-Implemented in `src/app/[username]/page.tsx`.
+Useful Redis commands include:
 
-This is a client component. It resolves the dynamic route parameter, requests the API endpoint, displays a loading state while the request is running, and renders an error state when the request fails.
+```bash
+redis-cli LLEN queue:github-audit
+redis-cli LLEN queue:github-audit:processing
+redis-cli GET lock:audit/<username>
+redis-cli GET stats:<username>
+redis-cli GET failed:audit:<username>
+```
 
-### Wrapped-data API
+Note that the lock key uses a colon between `audit` and the username:
 
 ```text
-GET /api/wrapped/<username>
+lock:audit:<username>
 ```
 
-Implemented in `src/app/api/wrapped/[username]/route.ts`.
+The processing list is intentionally separate from the pending queue so an in-flight job can be reclaimed after a worker crash.
 
-A successful response follows this shape:
+## Working on the audit API
+
+### `POST /api/audit`
+
+The request body is:
 
 ```json
 {
-  "source": "api",
-  "data": {
-    "user": {},
-    "overview": {},
-    "languages": [],
-    "streak": {},
-    "pullRequests": {},
-    "fetchedAt": "2026-01-01T00:00:00.000Z"
-  }
+  "username": "octocat"
 }
 ```
 
-`source` is `cache` when the response was served from Redis and `api` when GitHub data was fetched and processed during the request.
+The endpoint normalizes the handle to lowercase, validates it, acquires the per-user lock, and enqueues the job.
+
+A newly accepted job returns HTTP `202` with a job ID and polling URL. If another audit for the same username is already active, the endpoint reports that the audit is already processing rather than enqueueing a duplicate.
+
+### `GET /api/audit/status/<username>`
+
+The endpoint checks, in order:
+
+1. completed stats;
+2. the terminal failure marker; and
+3. the active audit lock.
+
+This ordering ensures completed and failed audits are terminal states from the browser's perspective.
+
+### `GET /api/wrapped/<username>`
+
+This endpoint provides a direct JSON read of completed stats. It returns `COMPLETED` when a valid cached report exists, `PROCESSING` while the audit lock is active, and `NOT_FOUND` when neither exists.
 
 ## Working on the GitHub query
 
-The GraphQL query lives in `src/lib/github.ts`.
+The worker's GraphQL query lives in `go-engine/infra/github_client.go`.
 
-When changing the query, update the matching TypeScript interfaces in `src/types/github.ts` and then update `processGithubMetrics()` if the new field needs transformation.
+When changing the query:
 
-Keep raw GitHub response types and UI-facing metric types separate. The application intentionally converts a relatively large API response into a compact `DevWrappedStats` object before passing data to the dashboard.
+1. Update the corresponding Go response structures.
+2. Update the metric transformation code.
+3. Verify the resulting `DevWrappedStats` payload.
+4. Update [`METRICS.md`](METRICS.md) if the definition or limitation of a metric changes.
+5. Check the dashboard cards that consume the affected fields.
+
+Keep GitHub transport types separate from the UI-facing processed structure.
 
 ## Working on metrics
 
-`src/lib/metrics.ts` is the main place for derived analytics.
+Metric calculation is performed by the Go engine. The main transformation logic lives with the audit service/domain implementation.
 
-A good workflow for metric changes is:
+When adding a metric, document:
 
-1. Add or modify the raw field in `src/types/github.ts`.
-2. Add the field to the GraphQL query.
-3. Transform it inside `processGithubMetrics()`.
-4. Add the resulting property to `DevWrappedStats` when the UI needs it.
-5. Update the appropriate dashboard card.
+- its GitHub source field;
+- whether the source is an aggregate or bounded node list;
+- the exact calculation;
+- its units and rounding rules; and
+- any pagination or result-window limitation.
 
-Be explicit about the population represented by a metric. For example, repository language composition is calculated from the first 50 owned non-fork repositories returned by the query, while contribution totals come from GitHub's aggregate contribution fields.
+The repository currently requests up to 50 repositories for language analysis and up to 100 pull-request nodes for state analysis.
 
 ## Working on the dashboard
 
-`src/components/editorial-dasboard.tsx` composes the dashboard from focused cards:
+`src/components/editorial-dashboard.tsx` composes the dashboard from focused components, including:
 
 ```text
 NavBar
@@ -153,55 +277,73 @@ PREfficiencyCard
 MomentumCard
 ```
 
-Keep data calculation out of the visual components whenever possible. The cards should receive already-processed values from `DevWrappedStats`.
+Keep data calculation out of visual components whenever possible. The dashboard should consume the processed `DevWrappedStats` object.
 
-The export control depends on the `dashboard-export` element ID. Avoid removing or renaming that element without updating `handleExportPng()`.
+The PNG export depends on the `dashboard-export` element ID. If that element changes, update the export handler at the same time.
 
-## Error handling
+## Error handling and failure recovery
 
-The API route deliberately treats Redis as a best-effort cache. A Redis read failure should not prevent a GitHub request, and a Redis write failure should not replace a successful API response with an error.
+The audit pipeline distinguishes several failure cases:
 
-The outer route handler converts GitHub rate-limit failures into HTTP 429 and unexpected failures into HTTP 500.
+- Redis unavailable during submission: the job cannot be enqueued.
+- GitHub fetch failure: the worker writes a temporary failure marker and releases the lock.
+- Worker crash during execution: the processing-list entry can be reclaimed on the next worker startup.
+- Malformed job payload: the worker removes it from the processing list instead of retrying it forever.
+- Status polling timeout: the browser reports that the worker may be unavailable after 90 seconds.
 
-When adding new error cases, preserve useful server logs while returning a safe, readable message to the browser.
+Preserve useful server-side logs while returning safe messages to the browser.
 
-## Docker development and production
+## Docker development and production images
 
-The Dockerfile uses three stages:
+There are two Dockerfiles:
 
-1. `deps`: installs dependencies with `npm ci`.
-2. `builder`: copies the source and creates the Next.js production build.
-3. `runner`: copies the standalone output and static assets into a minimal Node 22 Alpine image.
+### Root `Dockerfile`
 
-The runtime image runs as a non-root `nextjs` user. This should be preserved when modifying the image.
+Builds the Next.js application in three stages:
 
-The Next.js config sets:
+1. dependency installation with `npm ci`;
+2. Next.js production build; and
+3. a minimal Node 22 Alpine runtime using standalone output.
 
-```ts
-output: "standalone"
-```
+The runtime runs as the non-root `nextjs` user.
 
-Do not remove that setting without also changing the production Dockerfile, because the runtime stage expects the standalone server output.
+### `go-engine/Dockerfile`
 
-## Linting and build verification
+Builds the Go worker into a static Linux binary and copies it into a small Alpine runtime image.
+
+### Compose
+
+`docker-compose.yml` combines both images with Redis. It is the complete three-service local topology; the root Dockerfile alone is only the web application image.
+
+## Verification checklist
 
 Before opening a pull request, run:
 
 ```bash
 npm run lint
 npm run build
-```
 
-For a Docker-focused change, also run:
-
-```bash
 docker compose build
 ```
 
-For API changes, exercise at least one valid GitHub username and one invalid/non-existent username through `/api/wrapped/<username>`.
+For Go changes:
+
+```bash
+cd go-engine
+go test ./...
+go build ./...
+```
+
+For audit/API changes, exercise:
+
+- a valid GitHub username;
+- an invalid username;
+- an already-processing username;
+- a successful completion; and
+- a worker/GitHub failure path where practical.
 
 ## Pull request expectations
 
-Documentation or feature PRs should explain what changed and why. For implementation changes, describe the affected request path and the metrics or UI behavior that changed.
+Keep documentation and implementation changes focused. For implementation changes, describe the affected request/worker path and any metric or UI behavior that changed.
 
-Keep changes focused. If a cleanup is unrelated to the feature or documentation task, put it in a separate PR.
+Documentation changes should keep commands, routes, key names, environment variables, and architecture diagrams synchronized with the current implementation.
