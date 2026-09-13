@@ -2,191 +2,292 @@
 
 ## Overview
 
-DevWrapped is a Next.js application that turns a GitHub username into a compact developer activity dashboard. The application has four main responsibilities:
+DevWrapped is an asynchronous GitHub audit application. A Next.js application accepts an audit request and exposes the browser-facing API, while a separate Go worker performs the GitHub GraphQL fetch and metric processing. Redis connects the two processes and stores both pipeline state and completed reports.
 
-1. Accept a GitHub username from the landing page.
-2. Retrieve the user's GitHub profile, contribution, repository-language, pull-request, and review data through GitHub GraphQL.
-3. Transform the raw GraphQL response into a small, UI-oriented metrics object.
-4. Render those metrics as an editorial dashboard and allow the dashboard to be exported as a PNG.
+The system has four primary responsibilities:
 
-A Redis cache sits between the API route and GitHub so repeated requests for the same username normally avoid another GitHub API call.
+1. Accept and validate a GitHub username from the landing page.
+2. Enqueue an audit job and expose its processing status to the browser.
+3. Fetch GitHub data, calculate metrics, and persist the completed report.
+4. Render the completed report as an editorial dashboard and export it as a PNG.
 
-## Request flow
+This separation keeps the potentially slow GitHub operation out of the Next.js request lifecycle.
+
+## End-to-end request flow
 
 ```text
 Browser
   |
-  | GET /<username>
+  | POST /api/audit { username }
   v
-Next.js dynamic route
-src/app/[username]/page.tsx
+Next.js API route
   |
-  | fetch('/api/wrapped/<username>')
-  v
-Route handler
-src/app/api/wrapped/[username]/route.ts
+  +--> normalize + validate username
   |
-  +--------------------------+
-  |                          |
-  | Redis GET                | cache miss
-  v                          v
-Cached DevWrappedStats   GitHub GraphQL
-                               |
-                               v
-                         processGithubMetrics()
-                               |
-                               v
-                         DevWrappedStats
-                               |
-                               v
-                          Redis SETEX
-                               |
-                               v
-                         JSON response
+  +--> SET lock:audit:<username> NX EX 120
+  |
+  +--> LPUSH queue:github-audit
   |
   v
-EditorialDasboard
+Redis
   |
-  +--> UserHero
-  +--> LanguageCard
-  +--> StreakCard
-  +--> PREfficiencyCard
-  +--> MomentumCard
+  | BLMove queue -> queue:github-audit:processing
+  v
+Go worker pool
   |
-  +--> html-to-image PNG export
+  | FetchUserStats()
+  v
+GitHub GraphQL API
+  |
+  | raw data
+  v
+Metric processing
+  |
+  +--> SET stats:<username> EX 24h
+  +--> DEL lock:audit:<username>
+  |
+  v
+Browser polls GET /api/audit/status/<username>
+  |
+  +--> PROCESSING
+  +--> FAILED
+  +--> COMPLETED + data
+              |
+              v
+         /<username>
+              |
+              v
+      Redis stats read
+              |
+              v
+    EditorialDashboard
 ```
 
 ## Application structure
 
 | Path | Responsibility |
 | --- | --- |
-| `src/app/page.tsx` | Landing page, username input, demo shortcuts, feature overview |
-| `src/app/[username]/page.tsx` | Dynamic user page; fetches dashboard data and handles loading/error states |
-| `src/app/api/wrapped/[username]/route.ts` | Server-side API endpoint, validation, Redis cache, GitHub fetch, response handling |
-| `src/lib/github.ts` | GitHub GraphQL client and query definition |
-| `src/lib/metrics.ts` | Converts raw GitHub data into application metrics |
-| `src/lib/redis.ts` | Shared ioredis connection and environment-based connection settings |
-| `src/types/github.ts` | Raw GraphQL and processed metric TypeScript contracts |
+| `src/app/page.tsx` | Landing page, username input, quick handles, audit status UI |
+| `src/app/[username]/page.tsx` | Server-rendered user dashboard and audit-state fallbacks |
+| `src/app/api/audit/route.ts` | Validates requests, acquires the audit lock, and enqueues jobs |
+| `src/app/api/audit/status/[username]/route.ts` | Reports processing, failure, completion, or not-found state |
+| `src/app/api/wrapped/[username]/route.ts` | Direct JSON read of completed audit data |
+| `src/hooks/useAuditStatus.ts` | Submits audits and polls status with adaptive backoff and timeout |
+| `src/lib/audit.ts` | Shared username validation and Redis key definitions |
+| `src/lib/github.ts` | Defensive reader for completed stats from Redis |
+| `src/lib/redis.ts` | Shared ioredis connection for the Next.js process |
+| `src/types/github.ts` | Raw GitHub and processed metric TypeScript contracts |
 | `src/components/editorial-dashboard.tsx` | Dashboard composition and PNG export |
 | `src/components/dashboard/*` | Individual dashboard cards and navigation |
-| `next.config.ts` | Enables the React compiler and standalone production output |
-| `Dockerfile` | Multi-stage production image |
-| `docker-compose.yml` | Local/compose deployment with web + Go engine + Redis services |
+| `go-engine/main.go` | Worker process entry point |
+| `go-engine/config/config.go` | Worker configuration and defaults |
+| `go-engine/infra/github_client.go` | GitHub GraphQL client and query |
+| `go-engine/infra/queue_consumer.go` | Redis queue consumer and worker pool |
+| `go-engine/infra/redis.go` | Redis repository for stats, locks, and failures |
+| `go-engine/service/audit_service.go` | Audit orchestration and failure cleanup |
+| `go-engine/domain/*` | Worker domain contracts and metric structures |
+| `Dockerfile` | Next.js production image |
+| `go-engine/Dockerfile` | Go worker production image |
+| `docker-compose.yml` | Full local stack: web + engine + Redis |
 
 ## Server/client boundary
 
-The GitHub token is used only by the Go worker engine (`go-engine/infra/github_client.go`) and is never sent to the browser. The dynamic user page is a client component because it needs browser-side loading state and makes the request to the API route.
+The GitHub token is used by the Go engine when calling GitHub GraphQL and is never intentionally exposed to the browser. The Next.js API only handles audit orchestration and reads completed results from Redis.
 
-The dashboard is also a client component because PNG generation requires access to the DOM through `html-to-image`.
+The landing page is a client component because it owns the audit form, polling state, and automatic navigation after completion. The user dashboard route is a server component and reads completed stats directly from Redis before rendering `EditorialDashboard`.
+
+The dashboard itself remains a client component because PNG generation through `html-to-image` requires browser DOM access.
+
+## Audit pipeline
+
+### 1. Submission
+
+`POST /api/audit` accepts a JSON body containing `username`.
+
+The route normalizes the username to lowercase and validates it against GitHub's login character constraints used by the application: 1-39 characters containing only letters, numbers, and hyphens.
+
+Before enqueueing, the route attempts an atomic Redis lock:
+
+```text
+SET lock:audit:<username> processing EX 120 NX
+```
+
+If the lock already exists, the request returns an `already in progress` response instead of adding a duplicate job.
+
+### 2. Queue
+
+Jobs are JSON objects containing:
+
+```json
+{
+  "job_id": "job_<timestamp>_<username>",
+  "username": "github-login"
+}
+```
+
+They are pushed to `queue:github-audit`.
+
+### 3. Worker consumption
+
+The Go worker pool uses Redis `BLMove` to atomically move a job from the pending queue to:
+
+```text
+queue:github-audit:processing
+```
+
+This gives each active job a durable location while it is being executed.
+
+The worker pool defaults to five workers and uses bounded reconnect backoff when Redis operations fail. On startup, it checks the processing list and moves stranded jobs back to the pending queue, providing at-least-once handling across worker crashes or redeploys.
+
+### 4. GitHub fetch and processing
+
+The worker calls GitHub GraphQL through `go-engine/infra/github_client.go`. The returned data is transformed into the application's `DevWrappedStats` structure and saved to Redis under:
+
+```text
+stats:<username>
+```
+
+The completed report has a 24-hour TTL.
+
+### 5. Completion and failure
+
+On success, the worker removes the user's audit lock after saving the report.
+
+On a terminal error, the worker writes:
+
+```text
+failed:audit:<username>
+```
+
+with a 10-minute TTL and releases the audit lock. This gives the browser an explicit terminal state instead of making it poll until the lock's 120-second TTL expires.
+
+The processing-list entry is removed after the job has been handled. If a worker dies before removal, the next worker process can reclaim it during startup.
+
+## Browser polling
+
+`useAuditStatus()` starts polling after a successful enqueue. The polling interval begins at 800 ms, increases by a factor of 1.5, and is capped at 5 seconds.
+
+Polling stops when:
+
+- completed stats are returned;
+- the worker reports `FAILED`;
+- the status endpoint returns an HTTP error; or
+- 90 seconds have elapsed without completion.
+
+Abort controllers and timer cleanup prevent stale polling loops when the user starts another audit or the component unmounts.
 
 ## GitHub data collection
 
-The Go engine (`go-engine/infra/github_client.go`) performs a single GitHub v4 GraphQL query. The query requests:
+The Go engine performs a GitHub v4 GraphQL query requesting:
 
-- profile identity and biography
-- follower/following counts
-- total contributions
-- contribution calendar by day
-- commit contributions
-- pull-request contributions
-- pull-request review contributions
-- issue contributions
-- recent pull requests and their state
-- up to 50 owned, non-fork repositories
-- the five largest language edges returned for each repository
+- profile identity and biography;
+- follower/following counts;
+- total contributions;
+- contribution calendar by day;
+- commit contributions;
+- pull-request contributions;
+- pull-request review contributions;
+- issue contributions;
+- pull requests and their states;
+- up to 50 owned, non-fork repositories; and
+- up to five largest language entries per selected repository.
 
-The engine requires `GITHUB_TOKEN` to be present and uses it to authenticate a bearer-token GraphQL request.
+The engine requires `GITHUB_TOKEN` and authenticates the GraphQL request with that token.
 
 ## Metric processing
 
-`processGithubMetrics()` provides the application's central transformation layer.
+`processGithubMetrics()` is the central transformation layer.
 
 ### Languages
 
-Language byte sizes are merged across the selected repositories. The result is sorted by byte size and limited to the top five languages. Percentages are calculated from the aggregate byte total.
+Language byte sizes are merged across the selected repositories. The aggregate is sorted and reduced to the top five languages. Percentages are based on the aggregate bytes returned by GitHub.
 
-The source data is repository language-size information, not a count of files, commits, or lines of code. The landing page calls this a byte-accurate language breakdown because that is what the implementation actually calculates.
+This is a repository-language-byte metric, not a count of files, commits, or lines of code.
 
 ### Pull requests
 
-The processor counts the returned pull-request nodes by state and combines those counts with GitHub's `totalCount`. Merge rate is calculated as:
+The query requests at most 100 pull-request nodes. The processor counts the returned nodes by `MERGED`, `CLOSED`, and `OPEN` state while using GitHub's `totalCount` for the overall total when available.
+
+Merge rate is:
 
 ```text
-merged pull requests / total pull requests * 100
+merged / total * 100
 ```
 
-The current query requests at most 100 pull-request nodes, so state counts are bounded by that node window even though `totalCount` represents GitHub's total matching count.
+Because the state counts are bounded by the node window while `totalCount` is not, the resulting percentage is not guaranteed to represent every matching pull request.
 
 ### Streaks
 
 The contribution calendar is flattened and sorted chronologically.
 
-The longest streak is calculated with a forward scan that increments on active days and resets on zero-contribution days.
+The longest streak scans forward, incrementing on active days and resetting on inactive days. The current streak scans backward from the newest day; if that day is inactive, the algorithm first steps back one day so a streak ending yesterday remains active.
 
-The current streak is calculated with a backward scan from the newest calendar day. When the newest day has zero contributions, the algorithm first steps back one day, allowing a streak that runs through yesterday to remain active.
+## Redis state model
 
-### Overview metrics
+| Key | Written by | Read by | TTL | Purpose |
+| --- | --- | --- | --- | --- |
+| `lock:audit:<username>` | Next.js / worker | Next.js | 120s | Duplicate-audit protection and processing state |
+| `queue:github-audit` | Next.js | Go worker | List | Pending audit jobs |
+| `queue:github-audit:processing` | Go worker | Go worker | List | In-flight jobs for crash recovery |
+| `stats:<username>` | Go worker | Next.js | 24h | Completed dashboard data |
+| `failed:audit:<username>` | Go worker | Next.js | 10m | Terminal failure marker |
 
-The final `DevWrappedStats.overview` contains GitHub's contribution totals for commits, pull requests created, pull requests reviewed, issues, and calendar contributions.
-
-## Caching
-
-The API route normalizes the username to lower case and uses this Redis key:
-
-```text
-user:stats:<normalized-username>
-```
-
-The cache TTL is 86,400 seconds (24 hours).
-
-On a cache hit, the route returns the cached `DevWrappedStats` payload with `source: "cache"`.
-
-On a miss, the route fetches and processes GitHub data, writes the resulting payload with `SETEX`, and returns `source: "api"`.
-
-Redis failures are intentionally non-fatal. A Redis read error bypasses the cache and allows the request to continue to GitHub; a Redis write error is logged while the freshly processed response is still returned.
+The Next.js and Go implementations intentionally share the same username normalization and Redis key formats.
 
 ## HTTP behavior
 
-`GET /api/wrapped/:username` currently follows these response paths:
+The browser-facing audit state endpoint uses these states:
 
-| Condition | Status | Behavior |
-| --- | ---: | --- |
-| Missing/blank username | 400 | Returns `Invalid username parameter` |
-| User absent from GitHub response | 404 | Returns a user-not-found error |
-| GitHub rate-limit error detected | 429 | Returns a rate-limit message |
-| Unexpected processing/fetch error | 500 | Returns the error message |
-| Successful cache hit | 200 | Returns cached metrics |
-| Successful cache miss | 200 | Returns freshly fetched metrics |
+| State | Meaning |
+| --- | --- |
+| `PROCESSING` | An audit lock exists and the worker has not produced a completed report yet |
+| `FAILED` | The worker recorded a terminal failure |
+| `COMPLETED` | Valid cached stats are available |
+| `NOT_FOUND` | No completed stats or active audit exists |
+| `ERROR` | The status endpoint encountered an unexpected server error |
 
-Successful responses include `Cache-Control` headers with a one-hour browser freshness value and a 24-hour shared-cache value.
+See [`API.md`](API.md) for the full request and response contract.
 
 ## Rendering and export
 
-The dynamic route renders `EditorialDasboard` after the API request succeeds. The dashboard assembles the profile hero, language composition, contribution streaks, pull-request metrics, and contribution overview cards.
+`src/app/[username]/page.tsx` reads completed stats on the server. A missing report is distinguished from an active audit so the user can retry after processing begins.
 
-The export action finds the `dashboard-export` element and calls `toPng()` with a 2x pixel ratio and a dark background. The generated file is named:
+`EditorialDashboard` composes the profile hero, language composition, streaks, pull-request metrics, and contribution overview. The export action finds the `dashboard-export` element and uses `html-to-image` to create a 2x PNG named:
 
 ```text
 devwrapped-<github-login>.png
 ```
 
-## Deployment architecture
+## Deployment topology
 
-The repository is configured for a standalone Next.js build. `next.config.ts` sets `output: "standalone"`, and the Dockerfile copies the generated standalone server and static assets into a small Node 22 Alpine runtime image.
+There are two application containers plus Redis:
 
-The production container runs as a dedicated non-root `nextjs` user.
+```text
++-------------------+       +-------------------+
+| Next.js web       |       | Go audit engine   |
+| root Dockerfile   |       | go-engine/        |
++---------+---------+       +---------+---------+
+          |                           |
+          |                           |
+          +-----------+---------------+
+                      |
+                 +----v----+
+                 |  Redis  |
+                 +---------+
+```
 
-For Docker Compose, the application uses two services:
+The root `Dockerfile` builds only the Next.js web service. Redis and the Go engine are separate services in `docker-compose.yml`. Therefore, deploying only the root Dockerfile does not deploy the complete audit pipeline.
 
-- `web`: the Next.js production server on port `3000`
-- `redis`: Redis 7 Alpine on port `6379`
-
-Compose supplies the web container with `GITHUB_TOKEN` and a Redis URL pointing at the compose service name.
+For local or Docker-based deployments, use `docker compose up --build` to start all three services together.
 
 ## Important implementation constraints
 
-The application does not currently implement pagination for repository or pull-request nodes. The GraphQL query asks for 50 repositories and 100 pull requests. This means some metrics are intentionally based on bounded result windows while GitHub's aggregate contribution counters can cover the complete contribution history.
-
-The language metric is therefore a composition of the returned repository window, not a guaranteed account-wide byte total over every repository owned by the user.
-
-The current streak logic assumes the newest contribution-calendar day is either today or the latest day supplied by GitHub. It permits a streak ending yesterday when today is inactive, which is useful for an active streak interpretation.
+- Repository language data is capped at 50 owned, non-fork repositories.
+- Each selected repository contributes at most five language entries.
+- Pull-request state counts are capped at 100 returned nodes.
+- Aggregate contribution counters come from GitHub's contribution fields and do not share those node limits.
+- Completed stats expire after 24 hours.
+- The audit lock expires after 120 seconds.
+- Failure markers expire after 10 minutes.
+- The worker uses at-least-once processing; a job may be retried after a worker crash.
+- Redis is required for the audit pipeline. Without a reachable Redis instance, requests cannot enqueue work and the worker cannot consume it.
