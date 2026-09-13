@@ -12,7 +12,7 @@ For a GitHub user, DevWrapped currently presents:
 - Total contributions, commits, pull requests created, pull requests reviewed, and issues
 - Top language composition based on aggregated repository language bytes
 - Current and longest contribution streaks
-- Pull-request totals, state counts, and merge rate
+- Pull-request totals, state counts, merge rate, and merged-organization breakdown
 - A client-side PNG export of the dashboard
 
 The landing page describes the experience as an annual developer intelligence audit. The implementation is an asynchronous GitHub-data pipeline rather than a full historical analytics warehouse.
@@ -82,14 +82,13 @@ You need:
 
 ### Environment variables
 
-For the Next.js application:
+The Next.js process requires a reachable Redis instance for the audit endpoints:
 
 ```env
-GITHUB_TOKEN=your_github_token
 REDIS_URL=redis://localhost:6379
 ```
 
-For the Go engine:
+The Go engine uses:
 
 ```env
 GITHUB_TOKEN=your_github_token
@@ -98,7 +97,7 @@ QUEUE_NAME=queue:github-audit
 WORKERS=5
 ```
 
-`GITHUB_TOKEN` is required by the Go GitHub client. `REDIS_URL` defaults to `redis://localhost:6379` in both application layers when omitted. `QUEUE_NAME` defaults to `queue:github-audit`, and `WORKERS` defaults to `5` in the Go engine.
+`GITHUB_TOKEN` is required by the Go GitHub client. The root Compose file also passes the token to the web container, but GitHub authentication for the audit fetch itself happens in the Go engine. `REDIS_URL` defaults to `redis://localhost:6379` in both application layers when omitted. `QUEUE_NAME` defaults to `queue:github-audit`, and `WORKERS` defaults to `5` in the Go engine.
 
 Never expose `GITHUB_TOKEN` through client-side variables such as `NEXT_PUBLIC_*`.
 
@@ -130,7 +129,7 @@ Start Redis:
 docker run --name devwrap-redis -p 6379:6379 -d redis:7-alpine
 ```
 
-Then create your environment file and run the Next.js application:
+Then install dependencies and run the Next.js application:
 
 ```bash
 npm ci
@@ -196,11 +195,11 @@ The exact formulas are documented in [`docs/METRICS.md`](docs/METRICS.md).
 Important implementation limits include:
 
 - Up to 50 owned, non-fork repositories are considered for language composition.
-- Up to five language entries are considered per selected repository.
-- Up to 100 pull-request nodes are requested for state counts.
-- GitHub aggregate contribution counters are used for contribution totals and are not subject to those node-window limits.
+- Up to 10 language entries are returned per selected repository before aggregation.
+- Pull requests are fetched in pages of 100 until GitHub reports no further pages.
+- GitHub aggregate contribution counters are used for overview totals and are not derived from the repository or pull-request node windows.
 
-Language composition is therefore based on the repository sample returned by the current GraphQL query, not necessarily every repository in a user's account. Pull-request state counts can also cover a smaller node window than GitHub's total matching count.
+Language composition is therefore based on the repository/language sample returned by the current GraphQL query, not necessarily every repository or language associated with a user's account.
 
 ## Caching and failure behavior
 
