@@ -92,7 +92,7 @@ The Compose configuration exposes the web application on port `3000`. Redis is e
 
 ## Required environment
 
-The application and worker need the same GitHub token and Redis instance.
+The worker needs the GitHub token. Both the web process and worker need access to the same Redis instance.
 
 ```env
 GITHUB_TOKEN=your_github_token
@@ -101,7 +101,7 @@ QUEUE_NAME=queue:github-audit
 WORKERS=5
 ```
 
-`QUEUE_NAME` and `WORKERS` are worker settings. The web service only needs `GITHUB_TOKEN` and `REDIS_URL` from this group.
+`QUEUE_NAME` and `WORKERS` are worker settings. The web service needs `REDIS_URL`; `GITHUB_TOKEN` is consumed by the Go GitHub client. The current Compose file passes the token to the web container as well, but the Next.js code does not use it to query GitHub directly.
 
 For a managed Redis provider, replace `REDIS_URL` with the provider's connection URL. The Go engine accepts `redis://` and `rediss://` URLs, while the Next.js client enables TLS when the URL starts with `rediss://`.
 
@@ -208,7 +208,6 @@ When deploying to a platform that supports multiple services, configure:
 
 - Build from the repository root `Dockerfile`.
 - Expose port `3000`.
-- Provide `GITHUB_TOKEN`.
 - Provide the shared Redis connection through `REDIS_URL`.
 
 ### Worker service
