@@ -1,7 +1,14 @@
 import Link from "next/link";
 import { DevWrappedStats } from "@/types/github";
+import { formatFetchedAt } from "@/lib/format";
 
-export function UserHero({ stats }: { stats: DevWrappedStats }) {
+export function UserHero({
+  stats,
+  isRefreshing = false,
+}: {
+  stats: DevWrappedStats;
+  isRefreshing?: boolean;
+}) {
   const metrics = [
     [stats.overview.totalContributions, "Contributions"],
     [stats.overview.totalCommits, "Commits"],
@@ -40,14 +47,24 @@ export function UserHero({ stats }: { stats: DevWrappedStats }) {
             <h1 className="text-3xl font-medium tracking-[-0.04em] sm:text-5xl">
               {stats.user.name || stats.user.login}
             </h1>
-            <span className="inline-flex items-center gap-2 border border-emerald-500/30 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.14em] text-emerald-400">
-              <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />{" "}
-              Audit complete
-            </span>
+            {isRefreshing ? (
+              <span className="inline-flex items-center gap-2 border border-amber-500/30 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.14em] text-amber-400">
+                <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />{" "}
+                Refreshing
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2 border border-emerald-500/30 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.14em] text-emerald-400">
+                <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />{" "}
+                Audit complete
+              </span>
+            )}
           </div>
 
           <p className="font-mono text-xs text-muted-foreground">
             @{stats.user.login}
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground/70">
+            Last updated {formatFetchedAt(stats.fetchedAt)}
           </p>
           <p className="max-w-md text-sm leading-6 text-muted-foreground">
             {stats.user.bio}

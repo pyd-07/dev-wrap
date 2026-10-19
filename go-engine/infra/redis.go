@@ -65,3 +65,8 @@ func (r *RedisRepository) MarkFailed(ctx context.Context, username string) error
 	key := fmt.Sprintf("failed:audit:%s", username)
 	return r.client.Set(ctx, key, "failed", 10*time.Minute).Err()
 }
+
+func (r *RedisRepository) ClearFailure(ctx context.Context, username string) error {
+	key := fmt.Sprintf("failed:audit:%s", username)
+	return r.client.Del(ctx, key).Err()
+}

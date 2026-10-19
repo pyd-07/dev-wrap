@@ -18,15 +18,23 @@ This separation keeps the potentially slow GitHub operation out of the Next.js r
 ```text
 Browser
   |
-  | POST /api/audit { username }
+  | POST /api/audit { username, refresh? }
   v
 Next.js API route
   |
   +--> normalize + validate username
   |
+  +--> GET stats:<username>
+  |
+  +--> cached report and no refresh? --> 200 COMPLETED (returned at once)
+  |
   +--> SET lock:audit:<username> NX EX 120
   |
+  +--> DEL failed:audit:<username>
+  |
   +--> LPUSH queue:github-audit
+  |
+  +--> cached report? --> 200 REFRESHING + cached report
   |
   v
 Redis
@@ -49,7 +57,8 @@ Metric processing
   v
 Browser polls GET /api/audit/status/<username>
   |
-  +--> PROCESSING
+  +--> PROCESSING (no previous report)
+  +--> REFRESHING + previous report
   +--> FAILED
   +--> COMPLETED + data
               |
@@ -69,7 +78,7 @@ Browser polls GET /api/audit/status/<username>
 | --- | --- |
 | `src/app/page.tsx` | Landing page, username input, quick handles, audit status UI |
 | `src/app/[username]/page.tsx` | Server-rendered user dashboard and audit-state fallbacks |
-| `src/app/api/audit/route.ts` | Validates requests, acquires the audit lock, and enqueues jobs |
+| `src/app/api/audit/route.ts` | Serves cached reports and enqueues audits only for initial or explicit-refresh requests |
 | `src/app/api/audit/status/[username]/route.ts` | Reports processing, failure, completion, or not-found state |
 | `src/app/api/wrapped/[username]/route.ts` | Direct JSON read of completed audit data |
 | `src/hooks/useAuditStatus.ts` | Submits audits and polls status with adaptive backoff and timeout |
@@ -94,7 +103,9 @@ Browser polls GET /api/audit/status/<username>
 
 The GitHub token is used by the Go engine when calling GitHub GraphQL and is never intentionally exposed to the browser. The Next.js API only handles audit orchestration and reads completed results from Redis.
 
-The landing page is a client component because it owns the audit form, polling state, and automatic navigation after completion. The user dashboard route is a server component and reads completed stats directly from Redis before rendering `EditorialDashboard`.
+The landing page is a client component because it owns the audit form, polling state, and automatic navigation after completion. Its submission is cache-first: an existing report resolves without starting an audit, so navigation to the dashboard happens immediately. The user dashboard route is a server component and reads completed stats directly from Redis before rendering `EditorialDashboard`; that page still paints the cached report without waiting for any running audit.
+
+`EditorialDashboard` owns the dashboard's audit lifecycle. Searching from its navbar is a view action, and its explicit Refresh action submits a refresh for the displayed user while keeping the cached dashboard mounted.
 
 The dashboard itself remains a client component because PNG generation through `html-to-image` requires browser DOM access.
 
@@ -102,9 +113,15 @@ The dashboard itself remains a client component because PNG generation through `
 
 ### 1. Submission
 
-`POST /api/audit` accepts a JSON body containing `username`.
+`POST /api/audit` accepts a JSON body containing `username` and an optional `refresh` flag (default `false`).
 
 The route normalizes the username to lowercase and validates it against GitHub's login character constraints used by the application: 1-39 characters containing only letters, numbers, and hyphens.
+
+It then reads `stats:<username>`:
+
+- A valid cached report with no `refresh` request is returned immediately as `COMPLETED`. No lock is taken, no job is enqueued, and nothing polls afterwards.
+- A cached report with `refresh: true` is returned immediately as `REFRESHING` while a background audit is enqueued.
+- No cached report falls through to an initial audit.
 
 Before enqueueing, the route attempts an atomic Redis lock:
 
@@ -112,7 +129,7 @@ Before enqueueing, the route attempts an atomic Redis lock:
 SET lock:audit:<username> processing EX 120 NX
 ```
 
-If the lock already exists, the request returns an `already in progress` response instead of adding a duplicate job.
+If the lock already exists, the request returns the cached report (if any) as `REFRESHING`, or a `processing` response, instead of adding a duplicate job. A stale `failed:audit:<username>` marker is cleared before the job is pushed, so a failure from an earlier run cannot terminate polling for the new audit. The lock is released on request failure only if this request acquired it.
 
 ### 2. Queue
 
@@ -151,7 +168,7 @@ The completed report has a 24-hour TTL.
 
 ### 5. Completion and failure
 
-On success, the worker removes the user's audit lock after saving the report.
+On success, the worker removes the user's audit lock after saving the report and clears any previous failure marker. A previously completed report stays visible as stale data while a new audit runs; the status endpoint reports `REFRESHING` in that case.
 
 On a terminal error, the worker writes:
 
@@ -159,20 +176,22 @@ On a terminal error, the worker writes:
 failed:audit:<username>
 ```
 
-with a 10-minute TTL and releases the audit lock. This gives the browser an explicit terminal state instead of making it poll until the lock's 120-second TTL expires.
+with a 10-minute TTL and releases the audit lock. This gives the browser an explicit terminal state instead of making it poll until the lock's 120-second TTL expires. If a previous report exists, it is returned alongside `FAILED` and is not deleted. A new accepted audit clears the failure marker so a retry cannot be reported as failed by a marker from the earlier run.
 
 The processing-list entry is removed after the job has been handled. If a worker dies before removal, the next worker process can reclaim it during startup.
 
 ## Browser polling
 
-`useAuditStatus()` starts polling after a successful enqueue. The polling interval begins at 800 ms, increases by a factor of 1.5, and is capped at 5 seconds.
+`useAuditStatus()` polls only when a job was actually enqueued. A cache-hit submission resolves immediately with the cached report and never starts the polling loop. For a started audit, the polling interval begins at 800 ms, increases by a factor of 1.5, and is capped at 5 seconds.
 
 Polling stops when:
 
-- completed stats are returned;
+- the current audit completes with `COMPLETED`;
 - the worker reports `FAILED`;
 - the status endpoint returns an HTTP error; or
 - 90 seconds have elapsed without completion.
+
+`PROCESSING` and `REFRESHING` are non-terminal. During `REFRESHING`, the previous report remains on screen and the client continues polling; it does not navigate until the current audit reaches `COMPLETED`. On the dashboard route, an explicit refresh is started from the navbar and the cached dashboard stays visible; a completed refresh triggers a server-component refresh so the new report replaces the stale one. A failed refresh leaves the last successful report visible.
 
 Abort controllers and timer cleanup prevent stale polling loops when the user starts another audit or the component unmounts.
 
@@ -230,7 +249,7 @@ The longest streak scans forward, incrementing on active days and resetting on i
 | `queue:github-audit` | Next.js | Go worker | List | Pending audit jobs |
 | `queue:github-audit:processing` | Go worker | Go worker | List | In-flight jobs for crash recovery |
 | `stats:<username>` | Go worker | Next.js | 24h | Completed dashboard data |
-| `failed:audit:<username>` | Go worker | Next.js | 10m | Terminal failure marker |
+| `failed:audit:<username>` | Go worker | Next.js | 10m | Most recent terminal failure marker; cleared before a new audit is enqueued and after it succeeds |
 
 The Next.js and Go implementations intentionally share the same username normalization and Redis key formats.
 
@@ -240,17 +259,20 @@ The browser-facing audit state endpoint uses these states:
 
 | State | Meaning |
 | --- | --- |
-| `PROCESSING` | An audit lock exists and the worker has not produced a completed report yet |
-| `FAILED` | The worker recorded a terminal failure |
-| `COMPLETED` | Valid cached stats are available |
+| `PROCESSING` | An audit lock exists, no previous report is available, and the worker has not completed yet |
+| `REFRESHING` | An audit lock exists and a previous completed report is available as stale data |
+| `FAILED` | No newer audit is running and the worker recorded a terminal failure; a previous report may be included as `data` |
+| `COMPLETED` | No newer audit is running and valid cached stats are available |
 | `NOT_FOUND` | No completed stats or active audit exists |
 | `ERROR` | The status endpoint encountered an unexpected server error |
+
+The active lock takes precedence over both cached stats and a failure marker. The browser continues polling during `PROCESSING` and `REFRESHING`.
 
 See [`API.md`](API.md) for the full request and response contract.
 
 ## Rendering and export
 
-`src/app/[username]/page.tsx` reads completed stats on the server. A missing report is distinguished from an active audit so the user can retry after processing begins.
+`src/app/[username]/page.tsx` reads completed stats on the server. A cache hit renders the dashboard in the same round trip, independent of any running audit. If a newer audit is running, the page still renders the last completed dashboard but labels it as refreshing and shows its original `fetchedAt` time. The dashboard navbar can start an explicit refresh without unmounting the cached report. A missing report is distinguished from an active audit so the user can retry after processing begins.
 
 `EditorialDashboard` composes the profile hero, language composition, streaks, pull-request metrics, and contribution overview. The export action finds the `dashboard-export` element and uses `html-to-image` to create a 2x PNG named:
 

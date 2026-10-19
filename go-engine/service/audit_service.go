@@ -59,7 +59,13 @@ func (s *AuditService) execute(ctx context.Context, job domain.AuditJob) error {
 		return fmt.Errorf("failed to save stats: %w", err)
 	}
 
-	// 3. Clear distributed lock
+	// 3. A successful run supersedes any earlier failure marker so the status
+	// endpoint cannot keep reporting FAILED for a report that has been replaced.
+	if err := s.repo.ClearFailure(ctx, job.Username); err != nil {
+		log.Printf("Warning: Failed to clear failure marker for @%s: %v", job.Username, err)
+	}
+
+	// 4. Clear distributed lock
 	if err := s.repo.ReleaseLock(ctx, job.Username); err != nil {
 		log.Printf("Warning: Failed to release lock for @%s: %v", job.Username, err)
 	}

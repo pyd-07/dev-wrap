@@ -87,6 +87,9 @@ type AuditRepository interface {
 	// MarkFailed records a terminal failure so the status endpoint can
 	// surface FAILED instead of a stale PROCESSING state.
 	MarkFailed(ctx context.Context, username string) error
+	// ClearFailure removes a previous terminal failure marker once a newer
+	// audit has completed successfully.
+	ClearFailure(ctx context.Context, username string) error
 }
 
 // AuditUseCase defines core business engine functionality

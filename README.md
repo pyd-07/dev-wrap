@@ -153,14 +153,16 @@ The engine starts a worker pool and waits for jobs on `queue:github-audit`.
 
 1. Enter a GitHub username on `/`.
 2. The browser sends `POST /api/audit`.
-3. The Next.js server normalizes and validates the username, acquires a Redis lock, and enqueues an audit job.
-4. The Go worker consumes the job from Redis and queries GitHub GraphQL.
-5. The worker calculates the dashboard metrics and stores them under `stats:<username>` for 24 hours.
-6. The browser polls `/api/audit/status/<username>` with adaptive backoff.
-7. When the status becomes `COMPLETED`, the browser navigates to `/<username>`.
-8. The user page reads the completed stats from Redis and renders the dashboard server-side.
+3. The Next.js server normalizes and validates the username, then reads `stats:<username>`.
+4. If a valid report is cached and no refresh was requested, the server returns it immediately (HTTP `200`, `COMPLETED`). Nothing is enqueued and nothing is polled; the browser navigates straight to `/<username>`.
+5. Only when no report is cached, or when the request asks for a refresh, does the server acquire the Redis lock and enqueue an audit job. A refresh with a cached report returns that report immediately with `REFRESHING` while the job runs in the background.
+6. The Go worker consumes the job from Redis and queries GitHub GraphQL.
+7. The worker calculates the dashboard metrics and stores them under `stats:<username>` for 24 hours.
+8. While an audit runs, the browser polls `/api/audit/status/<username>` with adaptive backoff. The cached report stays on screen and the status endpoint never presents it as the result of the running audit.
+9. When the status becomes `COMPLETED` or `FAILED`, the browser stops polling. `COMPLETED` triggers navigation to `/<username>`, or a server-component refresh when the user is already on that dashboard.
+10. The user page reads the completed stats from Redis and renders the dashboard server-side.
 
-A failed audit gets a temporary `failed:audit:<username>` marker so the browser can stop polling instead of waiting for the lock to expire.
+A failed audit gets a temporary `failed:audit:<username>` marker so the browser can stop polling instead of waiting for the lock to expire. The marker is cleared before a new audit is enqueued and after a subsequent audit succeeds, so a retry is not reported as failed.
 
 ## API routes
 
@@ -168,7 +170,7 @@ A failed audit gets a temporary `failed:audit:<username>` marker so the browser 
 | --- | --- | --- |
 | `GET` | `/` | Landing page and audit controls |
 | `GET` | `/<username>` | Render a completed dashboard or an audit-state fallback |
-| `POST` | `/api/audit` | Enqueue an asynchronous audit job |
+| `POST` | `/api/audit` | Serve a cached report, or explicitly enqueue an asynchronous audit job |
 | `GET` | `/api/audit/status/<username>` | Return the current audit status and completed data |
 | `GET` | `/api/wrapped/<username>` | Read completed audit data through a direct JSON endpoint |
 
@@ -184,7 +186,7 @@ The audit pipeline uses a small, shared Redis key scheme:
 | `queue:github-audit` | Pending audit jobs | Persistent list |
 | `queue:github-audit:processing` | Jobs currently being executed | Persistent list |
 | `stats:<username>` | Completed `DevWrappedStats` payload | 24 hours |
-| `failed:audit:<username>` | Terminal failure marker | 10 minutes |
+| `failed:audit:<username>` | Most recent terminal failure marker; cleared before a new audit is enqueued and after it succeeds | 10 minutes |
 
 The Go worker moves jobs atomically from the queue into the processing list. On startup it reclaims jobs left there by a previous crash or redeploy, providing at-least-once job handling.
 
@@ -207,7 +209,9 @@ Redis is a required part of the audit pipeline: `/api/audit` needs it to acquire
 
 The dashboard read path is more defensive. A missing, malformed, or unreadable stats payload is treated as unavailable, allowing the user page to show an audit-incomplete or processing state instead of crashing.
 
-Completed audit results expire after 24 hours. Running the same username after expiry creates a fresh audit.
+Submissions are cache-first. An ordinary `POST /api/audit` with a valid `stats:<username>` report returns that report immediately and enqueues nothing, so a cache hit never waits on GitHub or the worker. An explicit refresh (`{ "refresh": true }`) returns the cached report immediately, then starts a new audit through the queue; while it runs, the status endpoint reports `REFRESHING` with the previous report as stale data and never labels the old report as the result of the new audit. The browser keeps the dashboard visible and continues polling until `COMPLETED` or `FAILED`. A refresh for a handle with no cached report behaves like an initial audit.
+
+Completed audit results expire after 24 hours. A successful refresh overwrites the previous report and resets that TTL. If a refresh fails, the previous report is preserved: the status endpoint returns `FAILED` together with the last successful report, and the dashboard keeps showing it with its original `fetchedAt` value.
 
 ## Docker
 

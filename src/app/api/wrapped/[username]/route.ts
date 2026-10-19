@@ -21,13 +21,25 @@ export async function GET(
     // 1. Fetch pre-computed stats cached by the Go engine (parse-safe helper)
     const stats = await getDevWrappedStats(username);
 
+    // 2. An active audit takes precedence over the cached report so callers do
+    // not mistake a stale report for the result of the running audit.
+    const isProcessing = await redis?.get(auditLockKey(username));
+
     if (stats) {
+      if (isProcessing) {
+        return NextResponse.json({
+          status: "REFRESHING",
+          message:
+            "A newer audit is in progress. Showing the last completed report.",
+          data: stats,
+        });
+      }
+
       // Envelope matches /api/audit/status: { status, data }
       return NextResponse.json({ status: "COMPLETED", data: stats });
     }
 
-    // 2. Fallback check: Check if an audit job is currently active
-    const isProcessing = await redis?.get(auditLockKey(username));
+    // 3. Fallback check: Check if an audit job is currently active
     if (isProcessing) {
       return NextResponse.json(
         { status: "PROCESSING", message: "Audit job in progress..." },

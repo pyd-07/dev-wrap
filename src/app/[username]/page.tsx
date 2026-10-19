@@ -2,7 +2,7 @@ import { DevWrappedStats } from "@/types/github";
 import { EditorialDashboard } from "@/components/editorial-dashboard";
 import { RetryButton, BackLink } from "@/components/user-page-actions";
 import { getDevWrappedStats } from "@/lib/github";
-import { auditLockKey, normalizeUsername } from "@/lib/audit";
+import { auditFailureKey, auditLockKey, normalizeUsername } from "@/lib/audit";
 import redis from "@/lib/redis";
 
 // Stats are cache-keyed per user; this route must never be statically
@@ -57,24 +57,40 @@ export default async function WrappedUserPage({
   // 1. Cache HIT: the whole dashboard is painted server-side in the same
   // round trip that delivers the HTML — no shell, no hydrate-then-fetch.
   let stats: DevWrappedStats | null = null;
+  let isProcessing = false;
+  let refreshFailed = false;
   try {
-    stats = await getDevWrappedStats(username);
+    const [loadedStats, lock, failure] = await Promise.all([
+      getDevWrappedStats(username),
+      redis?.get(auditLockKey(username)),
+      redis?.get(auditFailureKey(username)),
+    ]);
+    stats = loadedStats;
+    isProcessing = Boolean(lock);
+    refreshFailed = Boolean(failure);
   } catch {
     stats = null;
+    isProcessing = false;
+    refreshFailed = false;
   }
 
   if (stats) {
-    return <EditorialDashboard stats={stats} />;
+    // A newer audit may be running; keep the last completed report visible and
+    // label it as stale rather than pretending it is the current result.
+    return (
+      <EditorialDashboard
+        stats={stats}
+        isRefreshing={isProcessing}
+        refreshError={
+          !isProcessing && refreshFailed
+            ? "The most recent audit refresh failed."
+            : null
+        }
+      />
+    );
   }
 
   // 2. Cache MISS: distinguish "audit still running" from "never audited".
-  let isProcessing = false;
-  try {
-    isProcessing = Boolean(await redis?.get(auditLockKey(username)));
-  } catch {
-    isProcessing = false;
-  }
-
   if (isProcessing) {
     return (
       <FallbackCard
@@ -82,6 +98,18 @@ export default async function WrappedUserPage({
         title="AUDIT IN PROGRESS"
         message="Compiling this handle's DevWrapped stats right now. Give it a moment, then retry."
         tone="amber"
+        showRetry
+      />
+    );
+  }
+
+  if (refreshFailed) {
+    return (
+      <FallbackCard
+        username={username}
+        title="AUDIT FAILED"
+        message="The most recent audit did not complete. The handle may not exist, or the worker could not finish. Try again."
+        tone="rose"
         showRetry
       />
     );

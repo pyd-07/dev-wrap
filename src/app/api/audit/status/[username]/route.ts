@@ -7,6 +7,8 @@ import {
   isValidUsername,
   normalizeUsername,
 } from "@/lib/audit";
+import type { AuditStatusResponse } from "@/types/audit";
+import type { DevWrappedStats } from "@/types/github";
 
 export async function GET(
   request: Request,
@@ -17,49 +19,69 @@ export async function GET(
     const username = normalizeUsername(resolvedParams.username);
 
     if (!isValidUsername(username)) {
-      return NextResponse.json({ status: "NOT_FOUND" }, { status: 404 });
+      return NextResponse.json<AuditStatusResponse>(
+        { status: "NOT_FOUND" },
+        { status: 404 },
+      );
     }
 
-    const cachedStats = await redis.get(auditStatsKey(username));
-    if (cachedStats) {
-      return NextResponse.json({
-        status: "COMPLETED",
-        data:
-          typeof cachedStats === "string"
-            ? JSON.parse(cachedStats)
-            : cachedStats,
-      });
-    }
+    // Read all pipeline state together so the reported status reflects one
+    // consistent view of Redis.
+    const [cachedStats, failedMarker, activeLock] = await Promise.all([
+      redis.get(auditStatsKey(username)),
+      redis.get(auditFailureKey(username)),
+      redis.get(auditLockKey(username)),
+    ]);
 
-    // Terminal failure marker written by the Go worker (10-min TTL). Surface
-    // it explicitly so clients stop polling instead of falling through to a
-    // 404 that can be re-polled forever.
-    const failedMarker = await redis.get(auditFailureKey(username));
-    if (failedMarker) {
-      return NextResponse.json({
-        status: "FAILED",
-        message:
-          "GitHub audit failed for this user. The handle may not exist or the audit could not be completed.",
-      });
-    }
+    const stats: DevWrappedStats | null = cachedStats
+      ? typeof cachedStats === "string"
+        ? (JSON.parse(cachedStats) as DevWrappedStats)
+        : cachedStats
+      : null;
 
-    const isProcessing = await redis.get(auditLockKey(username));
-    if (isProcessing) {
-      return NextResponse.json({
+    // The active lock always wins: a cached report must never be reported as
+    // the completed result of an audit that is still running.
+    if (activeLock) {
+      if (stats) {
+        return NextResponse.json<AuditStatusResponse>({
+          status: "REFRESHING",
+          message:
+            "A newer audit is running. Showing the last completed report.",
+          data: stats,
+        });
+      }
+
+      return NextResponse.json<AuditStatusResponse>({
         status: "PROCESSING",
         message: "Audit in progress...",
       });
     }
 
-    return NextResponse.json(
-      {
-        status: "NOT_FOUND",
-      },
+    // No audit is running. A failure marker means the most recent audit did not
+    // complete; keep any previously completed report available as stale data.
+    if (failedMarker) {
+      return NextResponse.json<AuditStatusResponse>({
+        status: "FAILED",
+        message:
+          "GitHub audit failed for this user. The handle may not exist or the audit could not be completed.",
+        ...(stats ? { data: stats } : {}),
+      });
+    }
+
+    if (stats) {
+      return NextResponse.json<AuditStatusResponse>({
+        status: "COMPLETED",
+        data: stats,
+      });
+    }
+
+    return NextResponse.json<AuditStatusResponse>(
+      { status: "NOT_FOUND" },
       { status: 404 },
     );
   } catch (error) {
     console.error("Error fetching audit status:", error);
-    return NextResponse.json(
+    return NextResponse.json<AuditStatusResponse>(
       {
         status: "ERROR",
         message: "An error occurred while fetching the audit status.",

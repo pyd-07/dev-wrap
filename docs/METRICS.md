@@ -135,9 +135,9 @@ The streak data also carries GitHub's aggregate `totalContributions` value.
 
 The worker generates `fetchedAt` when it constructs the processed report.
 
-Completed reports are stored in Redis for 24 hours. During that period, repeated reads return the same cached payload and therefore the original `fetchedAt` value.
+Completed reports are stored in Redis for 24 hours. Reading the dashboard or a completed audit status does not by itself trigger a refresh, so repeated reads return the same cached payload and the same `fetchedAt` value until a new audit overwrites it.
 
-A new audit is required to produce a fresh report after the cached report expires.
+Submitting a username always starts a new audit when no audit is already running, even if a report is cached. While that audit runs, the status endpoint reports `REFRESHING` and returns the previous report as stale data. The dashboard keeps the previous report visible and labels it with its original `fetchedAt`; the new report replaces it only when the current audit completes. A successful audit overwrites the report and resets the 24-hour TTL. A failed audit preserves the previous report.
 
 ## Metric source and processing model
 
@@ -175,5 +175,5 @@ The current implementation has these important boundaries:
 - Pull requests are paginated in batches of 100, so the PR activity calculation is not limited to a single page.
 - GitHub contribution totals come from aggregate contribution fields rather than from the pull-request or repository node lists.
 - Streaks are calculated from the contribution calendar returned by GitHub; they are not independently reconstructed from every repository or event.
-- Completed reports are cached for 24 hours, so the dashboard is not continuously recalculated.
+- Completed reports are cached for 24 hours, so the dashboard is not continuously recalculated. A new submission starts a refresh while the previous report remains visible as stale data.
 - A failed audit produces a temporary failure marker rather than a partial report.

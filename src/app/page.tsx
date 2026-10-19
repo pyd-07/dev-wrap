@@ -46,7 +46,9 @@ export default function LandingPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const { status, data, error, startAudit, completedUsername } = useAuditStatus();
 
-  // Handle Form Submission: Trigger async audit via hook
+  // Handle Form Submission: viewing a handle. The hook's submission endpoint is
+  // cache-first, so an existing report resolves immediately; an audit only
+  // starts when no cached report exists.
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const handle = searchQuery.trim().toLowerCase();
@@ -67,7 +69,10 @@ export default function LandingPage() {
     }
   }, [status, completedUsername, router]);
 
-  const isProcessing = status === "ENQUEUED" || status === "PROCESSING";
+  const isProcessing =
+    status === "ENQUEUED" ||
+    status === "PROCESSING" ||
+    status === "REFRESHING";
 
   return (
     <main className="min-h-screen overflow-x-hidden bg-background text-foreground selection:bg-emerald-500 selection:text-zinc-950">
@@ -174,7 +179,9 @@ export default function LandingPage() {
                 <div className="space-y-1 text-emerald-400">
                   <p>► Enqueued job to Redis: queue:github-audit</p>
                   <p className="text-foreground animate-pulse">
-                    ► Executing GitHub v4 GraphQL AST query...
+                    {status === "REFRESHING"
+                      ? "► Refreshing cached report with a new GitHub audit..."
+                      : "► Executing GitHub v4 GraphQL AST query..."}
                   </p>
                   <p className="text-[10px] text-muted-foreground">
                     Calculating streaks, repository languages, and PR metrics...

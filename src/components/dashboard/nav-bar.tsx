@@ -1,32 +1,45 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Search, Share2, ArrowRight } from "lucide-react";
-import { useAuditStatus } from "@/hooks/useAuditStatus";
+import { Search, Share2, ArrowRight, RotateCw } from "lucide-react";
+import type { AuditStatus } from "@/hooks/useAuditStatus";
 
 interface NavBarProps {
   onExport: () => void;
   isExporting: boolean;
+  onSearch: (username: string) => void;
+  onRefresh: () => void;
+  status: AuditStatus;
+  error: string | null;
+  activeUsername: string | null;
+  currentUsername?: string;
 }
 
-export function NavBar({ onExport, isExporting }: NavBarProps) {
+export function NavBar({
+  onExport,
+  isExporting,
+  onSearch,
+  onRefresh,
+  status,
+  error,
+  activeUsername,
+  currentUsername,
+}: NavBarProps) {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
-  const { status, error, startAudit, completedUsername } = useAuditStatus();
-  const isAuditing = status === "ENQUEUED" || status === "PROCESSING";
-
-  useEffect(() => {
-    if (status === "COMPLETED" && completedUsername) {
-      router.push(`/${encodeURIComponent(completedUsername)}`);
-    }
-  }, [completedUsername, router, status]);
+  const isAuditing =
+    status === "ENQUEUED" ||
+    status === "PROCESSING" ||
+    status === "REFRESHING";
 
   const handleSearchSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const username = searchQuery.trim().toLowerCase();
-    if (username) {
-      startAudit(username);
+    // Searching is a "view" action: it only starts an audit when the handle has
+    // no cached report yet (the API decides that).
+    if (username && !isAuditing) {
+      onSearch(username);
     }
   };
 
@@ -50,11 +63,31 @@ export function NavBar({ onExport, isExporting }: NavBarProps) {
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={isAuditing ? "Auditing…" : "Search username"}
+              placeholder={
+                isAuditing
+                  ? status === "REFRESHING"
+                    ? "Refreshing…"
+                    : "Auditing…"
+                  : "Search username"
+              }
               disabled={isAuditing}
               className="min-w-0 w-full bg-transparent font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground sm:w-36"
             />
           </form>
+
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={isAuditing || !currentUsername}
+            className="flex h-9 items-center justify-center gap-2 border border-border px-3 font-mono text-[10px] uppercase tracking-[0.12em] transition-all hover:border-amber-500/60 hover:bg-amber-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <RotateCw
+              size={12}
+              className={status === "REFRESHING" ? "animate-spin" : undefined}
+              aria-hidden="true"
+            />
+            Refresh
+          </button>
 
           <button
             onClick={onExport}
@@ -71,8 +104,13 @@ export function NavBar({ onExport, isExporting }: NavBarProps) {
           </button>
         </div>
         {isAuditing && (
-          <p className="font-mono text-[10px] text-emerald-400">
-            Auditing @{searchQuery.trim().toLowerCase()}…
+          <p
+            className={`font-mono text-[10px] ${
+              status === "REFRESHING" ? "text-amber-400" : "text-emerald-400"
+            }`}
+          >
+            {status === "REFRESHING" ? "Refreshing" : "Auditing"}
+            {activeUsername ? ` @${activeUsername}` : ""}…
           </p>
         )}
         {status === "FAILED" && (

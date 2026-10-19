@@ -166,13 +166,13 @@ go build ./...
 A normal audit follows this sequence:
 
 1. The landing page calls `POST /api/audit`.
-2. Next.js validates the username and acquires `lock:audit:<username>`.
-3. Next.js pushes a JSON job to `queue:github-audit`.
+2. Next.js validates the username and reads `stats:<username>`. If a valid report is cached and no refresh was requested, the route returns it immediately and the flow stops here — no lock, no job, no polling.
+3. For an initial audit (or an explicit `{ "refresh": true }`), Next.js acquires `lock:audit:<username>`, clears any stale failure marker, and pushes a JSON job to `queue:github-audit`. With a cached report, the response already carries it as `REFRESHING`.
 4. The Go worker moves the job to `queue:github-audit:processing`.
 5. The worker fetches GitHub data and calculates `DevWrappedStats`.
 6. The worker stores the result in `stats:<username>` for 24 hours and releases the lock.
-7. The browser polls `GET /api/audit/status/<username>` until it receives `COMPLETED`.
-8. The browser navigates to `/<username>`, where the server reads the completed report from Redis.
+7. The browser polls `GET /api/audit/status/<username>` until it receives `COMPLETED` or `FAILED`. While a newer audit runs and a previous report exists, the endpoint returns `REFRESHING` with the previous report as stale data.
+8. The browser navigates to `/<username>`, where the server reads the completed report from Redis. If the user is already on that dashboard, the dashboard's Refresh action keeps the cached report visible and a completed audit refreshes the route so the new report replaces it without a manual reload.
 
 If the worker is not running, the audit request can still be accepted into Redis, but it will remain unprocessed until a worker consumes it. The browser eventually stops polling after its 90-second timeout.
 
@@ -214,27 +214,30 @@ The request body is:
 
 ```json
 {
-  "username": "octocat"
+  "username": "octocat",
+  "refresh": false
 }
 ```
 
-The endpoint normalizes the handle to lowercase, validates it, acquires the per-user lock, and enqueues the job.
+The endpoint normalizes the handle to lowercase, validates it, and reads `stats:<username>` first. With a valid cached report and `refresh` left at its default (`false`), it returns HTTP `200` with `COMPLETED` and the report; nothing is enqueued. With `refresh: true`, it returns the cached report as `REFRESHING` immediately after enqueueing a background job. Without a cached report it acquires the per-user lock and enqueues an initial audit.
 
-A newly accepted job returns HTTP `202` with a job ID and polling URL. If another audit for the same username is already active, the endpoint reports that the audit is already processing rather than enqueueing a duplicate.
+A newly accepted initial audit returns HTTP `202` with a job ID and polling URL. If another audit for the same username is already active, the endpoint reports that the audit is already processing (with the cached report when one exists) rather than enqueueing a duplicate. A stale failure marker is cleared before enqueueing, and the lock is only released on failure when this request acquired it.
 
 ### `GET /api/audit/status/<username>`
 
-The endpoint checks, in order:
+The endpoint checks the active audit lock first, then the terminal failure marker, then completed stats:
 
-1. completed stats;
-2. the terminal failure marker; and
-3. the active audit lock.
+1. active audit lock: `PROCESSING` when no report exists, or `REFRESHING` with the previous report as stale data;
+2. failure marker with no active audit: `FAILED`, including any previous report as `data`; and
+3. completed stats with no active audit: `COMPLETED`.
 
-This ordering ensures completed and failed audits are terminal states from the browser's perspective.
+This ordering ensures a cached report is never presented as the result of an audit that is still running. A failure marker from an earlier run is cleared before a new audit is enqueued, and the worker clears it after a successful audit, so retries are not reported as failed.
 
 ### `GET /api/wrapped/<username>`
 
-This endpoint provides a direct JSON read of completed stats. It returns `COMPLETED` when a valid cached report exists, `PROCESSING` while the audit lock is active, and `NOT_FOUND` when neither exists.
+This endpoint provides a direct JSON read of completed stats. It returns `COMPLETED` when a valid cached report exists and no audit is running, `REFRESHING` with the previous report when a newer audit is active, `PROCESSING` when the audit lock is active and no report exists, and `NOT_FOUND` when neither exists.
+
+Both `PROCESSING` and `REFRESHING` are non-terminal. The client keeps polling through them; only `COMPLETED` updates the displayed report, and a failed refresh preserves the last successful report. A `COMPLETED` submission response from `POST /api/audit` is a cache hit and bypasses polling entirely.
 
 ## Working on the GitHub query
 

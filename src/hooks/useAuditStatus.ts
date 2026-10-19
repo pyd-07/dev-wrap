@@ -2,13 +2,23 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { DevWrappedStats } from '@/types/github';
+import type { AuditStatusResponse, AuditSubmitResponse } from '@/types/audit';
 
-export type AuditStatus = 'IDLE' | 'ENQUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+export type AuditStatus =
+  | 'IDLE'
+  | 'ENQUEUED'
+  | 'PROCESSING'
+  | 'REFRESHING'
+  | 'COMPLETED'
+  | 'FAILED';
 
-interface StatusPayload {
-  status?: string;
-  message?: string;
-  data?: unknown;
+interface StartAuditOptions {
+  /**
+   * Requests a new audit even when a cached report exists. Without it the
+   * submission is a plain "view" request: a cache hit resolves immediately
+   * with the cached report and no polling.
+   */
+  refresh?: boolean;
 }
 
 // Adaptive polling: fast checks while the job is likely young, progressively
@@ -27,50 +37,90 @@ export function useAuditStatus() {
   const [completedUsername, setCompletedUsername] = useState<string | null>(null);
   const submissionControllerRef = useRef<AbortController | null>(null);
 
-  const startAudit = useCallback(async (username: string) => {
-    const handle = username.trim().toLowerCase();
-    if (!handle) return;
+  const startAudit = useCallback(
+    async (username: string, options?: StartAuditOptions) => {
+      const handle = username.trim().toLowerCase();
+      if (!handle) return;
 
-    submissionControllerRef.current?.abort();
-    const controller = new AbortController();
-    submissionControllerRef.current = controller;
+      const refresh = options?.refresh === true;
 
-    setActiveUsername(handle);
-    setCompletedUsername(null);
-    setStatus('ENQUEUED');
-    setError(null);
-    setData(null);
+      submissionControllerRef.current?.abort();
+      const controller = new AbortController();
+      submissionControllerRef.current = controller;
 
-    try {
-      const res = await fetch('/api/audit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: handle }),
-        signal: controller.signal,
-      });
-
-      const initData = await res.json();
-
-      if (!res.ok && res.status !== 202) {
-        throw new Error(initData.error || initData.message || 'Failed to initialize audit');
+      setActiveUsername(handle);
+      setCompletedUsername(null);
+      setStatus(refresh ? 'REFRESHING' : 'ENQUEUED');
+      setError(null);
+      // An explicit refresh keeps the current report on screen; a new handle
+      // starts from a clean slate.
+      if (!refresh) {
+        setData(null);
       }
 
-      if (submissionControllerRef.current === controller) {
+      try {
+        const res = await fetch('/api/audit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: handle, refresh }),
+          signal: controller.signal,
+        });
+
+        const initData = (await res.json()) as AuditSubmitResponse & {
+          error?: string;
+        };
+
+        if (!res.ok && res.status !== 202) {
+          throw new Error(
+            initData.message || initData.error || 'Failed to initialize audit',
+          );
+        }
+
+        if (submissionControllerRef.current !== controller) {
+          return;
+        }
+
+        // Cache hit: the report was already available, so there is nothing to
+        // poll for. Resolve immediately so callers can render or navigate.
+        if (initData.status === 'COMPLETED' && initData.data) {
+          setData(initData.data);
+          setCompletedUsername(handle);
+          setStatus('COMPLETED');
+          setActiveUsername(null);
+          return;
+        }
+
+        // Explicit refresh (or an audit that was already running): keep the
+        // cached report visible and follow the audit through to completion.
+        if (initData.status === 'REFRESHING') {
+          if (initData.data) {
+            setData(initData.data);
+          }
+          setStatus('REFRESHING');
+          return;
+        }
+
         setStatus('PROCESSING');
+      } catch (err: unknown) {
+        if (controller.signal.aborted || submissionControllerRef.current !== controller) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : 'Error submitting audit job';
+        setStatus('FAILED');
+        setError(message);
+        setActiveUsername(null);
       }
-    } catch (err: unknown) {
-      if (controller.signal.aborted || submissionControllerRef.current !== controller) {
-        return;
-      }
-      const message = err instanceof Error ? err.message : 'Error submitting audit job';
-      setStatus('FAILED');
-      setError(message);
-      setActiveUsername(null);
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!activeUsername || (status !== 'PROCESSING' && status !== 'ENQUEUED')) {
+    if (
+      !activeUsername ||
+      (status !== 'PROCESSING' &&
+        status !== 'ENQUEUED' &&
+        status !== 'REFRESHING')
+    ) {
       return;
     }
 
@@ -102,9 +152,9 @@ export function useAuditStatus() {
         });
 
         // Guard against non-JSON bodies (e.g. HTML 502 pages from a proxy)
-        let statusPayload: StatusPayload;
+        let statusPayload: AuditStatusResponse;
         try {
-          statusPayload = await res.json();
+          statusPayload = (await res.json()) as AuditStatusResponse;
         } catch {
           statusPayload = { status: 'ERROR', message: 'Malformed status response' };
         }
@@ -113,7 +163,7 @@ export function useAuditStatus() {
 
         if (statusPayload.status === 'COMPLETED') {
           stopPolling();
-          setData((statusPayload.data as DevWrappedStats) ?? null);
+          setData(statusPayload.data ?? null);
           setCompletedUsername(activeUsername);
           setStatus('COMPLETED');
           setActiveUsername(null); // Terminal: stop further polling
@@ -122,9 +172,25 @@ export function useAuditStatus() {
 
         // Terminal failure: explicit FAILED from the worker OR any HTTP error
         // (404 NOT_FOUND for unknown handles, 500 ERROR, etc.). Never reschedule.
+        // A failed refresh may still carry the last completed report; keep it on
+        // screen instead of discarding it.
         if (statusPayload.status === 'FAILED' || !res.ok) {
+          if (statusPayload.data) {
+            setData(statusPayload.data);
+          }
           fail(statusPayload.message || 'GitHub user not found or audit failed');
           return;
+        }
+
+        // Non-terminal in-progress states. A REFRESHING response also carries
+        // the previous report, which stays visible until the new audit lands.
+        if (statusPayload.status === 'REFRESHING') {
+          if (statusPayload.data) {
+            setData(statusPayload.data);
+          }
+          setStatus('REFRESHING');
+        } else if (statusPayload.status === 'PROCESSING') {
+          setStatus('PROCESSING');
         }
 
         // Hard ceiling: no successful poll within the window means the job is
@@ -134,9 +200,9 @@ export function useAuditStatus() {
           return;
         }
 
-        // Still ENQUEUED/PROCESSING — back off before the next poll so long
-        // audits don't spam the status endpoint, rescheduling only while
-        // subscribed.
+        // Still ENQUEUED/PROCESSING/REFRESHING — back off before the next poll
+        // so long audits don't spam the status endpoint, rescheduling only
+        // while subscribed.
         if (isSubscribed) {
           const nextInterval = Math.min(
             Math.round(intervalMs * POLL_BACKOFF_FACTOR),
@@ -159,5 +225,12 @@ export function useAuditStatus() {
     };
   }, [activeUsername, status]);
 
-  return { status, data, error, startAudit, completedUsername };
+  return {
+    status,
+    data,
+    error,
+    startAudit,
+    activeUsername,
+    completedUsername,
+  };
 }
