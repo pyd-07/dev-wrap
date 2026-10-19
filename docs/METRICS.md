@@ -137,7 +137,7 @@ The worker generates `fetchedAt` when it constructs the processed report.
 
 Completed reports are stored in Redis for 24 hours. Reading the dashboard or a completed audit status does not by itself trigger a refresh, so repeated reads return the same cached payload and the same `fetchedAt` value until a new audit overwrites it.
 
-Submitting a username always starts a new audit when no audit is already running, even if a report is cached. While that audit runs, the status endpoint reports `REFRESHING` and returns the previous report as stale data. The dashboard keeps the previous report visible and labels it with its original `fetchedAt`; the new report replaces it only when the current audit completes. A successful audit overwrites the report and resets the 24-hour TTL. A failed audit preserves the previous report.
+Submission is cache-first. An ordinary `POST /api/audit` with a valid cached report returns that report immediately and starts no audit, so repeated reads keep returning the same `fetchedAt` value. Only an explicit `{ "refresh": true }` request — or a handle with no cached report — creates a new audit. While that audit runs, the status endpoint reports `REFRESHING` and returns the previous report as stale data. The dashboard keeps the previous report visible and labels it with its original `fetchedAt`; the new report replaces it only when the current audit completes. A successful audit overwrites the report and resets the 24-hour TTL. A failed audit preserves the previous report.
 
 ## Metric source and processing model
 
@@ -175,5 +175,5 @@ The current implementation has these important boundaries:
 - Pull requests are paginated in batches of 100, so the PR activity calculation is not limited to a single page.
 - GitHub contribution totals come from aggregate contribution fields rather than from the pull-request or repository node lists.
 - Streaks are calculated from the contribution calendar returned by GitHub; they are not independently reconstructed from every repository or event.
-- Completed reports are cached for 24 hours, so the dashboard is not continuously recalculated. A new submission starts a refresh while the previous report remains visible as stale data.
+- Completed reports are cached for 24 hours, so the dashboard is not continuously recalculated. Refreshes are explicit (or happen on first audit); while one runs, the previous report remains visible as stale data.
 - A failed audit produces a temporary failure marker rather than a partial report.

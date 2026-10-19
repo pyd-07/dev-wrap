@@ -146,7 +146,7 @@ The worker pings Redis during startup. If the connection cannot be established, 
 
 Use the landing page and submit a valid GitHub username.
 
-The expected pipeline is:
+For a handle with no cached report, the expected pipeline is:
 
 ```text
 POST /api/audit
@@ -158,7 +158,24 @@ POST /api/audit
       -> /<username>
 ```
 
-### 5. Inspect queue depth when debugging
+If a report is already cached for that handle, `POST /api/audit` returns it immediately (HTTP `200`, `COMPLETED`) without enqueueing anything; an explicit `{ "refresh": true }` is required to run a new audit.
+
+### 5. Use the health endpoint
+
+`GET /api/health` returns HTTP `200` with the Redis status and both queue depths:
+
+```json
+{
+  "status": "ok",
+  "redis": "connected",
+  "queueDepth": 0,
+  "processingDepth": 0
+}
+```
+
+HTTP `503` with `status: "degraded"` means Next.js cannot reach Redis.
+
+### 6. Inspect queue depth when debugging
 
 ```bash
 redis-cli LLEN queue:github-audit
@@ -200,6 +217,23 @@ The Go engine defaults to five worker goroutines. Each worker may issue GitHub r
 
 The Redis workload is small but must remain reachable by both application services. Completed reports expire after 24 hours, and failure markers expire after 10 minutes.
 
+## CDN and HTTP caching
+
+`src/proxy.ts` sets `Cache-Control` headers on responses; it does not control the applicative Redis caching:
+
+| Route family | `Cache-Control` | Notes |
+| --- | --- | --- |
+| `/[username]` page HTML | `public, s-maxage=30, stale-while-revalidate=120` | Single-segment username pages only |
+| `/api/wrapped/[username]` | `public, s-maxage=30, stale-while-revalidate=60` | JSON envelope of completed audits |
+| `/api/audit`, `/api/audit/status/*`, `/api/health` | none (excluded by the matcher) | Pollers must see live status transitions |
+| `/<username>/og` | none (excluded in the branch logic) | Social crawlers always render fresh |
+| `/` | none | Landing page is a client component |
+
+The short `s-maxage` windows exist because the fallback HTML ("audit in progress" / "not found") is also cacheable at a CDN; stale-while-revalidate lets a just-finished audit be picked up by the background refresh.
+
+Limitation: the headers are only a claim to whatever CDN or reverse proxy sits in front of the application (the project targets Render). Whether that platform actually honors `s-maxage` and `stale-while-revalidate` cannot be determined from repository inspection alone; verify with `curl -I` against the deployed URL.
+
+## Platform configuration checklist
 ## Platform configuration checklist
 
 When deploying to a platform that supports multiple services, configure:

@@ -18,9 +18,10 @@ The repository includes `package-lock.json` and `go.sum`, so use the lockfiles w
 The Next.js process uses:
 
 ```env
-GITHUB_TOKEN=your_github_token
 REDIS_URL=redis://localhost:6379
 ```
+
+`NEXT_PUBLIC_APP_URL` is optional and only influences generated metadata (`metadataBase`) when set. The Next.js code never reads `GITHUB_TOKEN` for auditing — GitHub authentication happens in the Go engine, even though the Compose file passes the token to the web container.
 
 The Go engine uses:
 
@@ -174,7 +175,7 @@ A normal audit follows this sequence:
 7. The browser polls `GET /api/audit/status/<username>` until it receives `COMPLETED` or `FAILED`. While a newer audit runs and a previous report exists, the endpoint returns `REFRESHING` with the previous report as stale data.
 8. The browser navigates to `/<username>`, where the server reads the completed report from Redis. If the user is already on that dashboard, the dashboard's Refresh action keeps the cached report visible and a completed audit refreshes the route so the new report replaces it without a manual reload.
 
-If the worker is not running, the audit request can still be accepted into Redis, but it will remain unprocessed until a worker consumes it. The browser eventually stops polling after its 90-second timeout.
+If the worker is not running, the audit request can still be accepted into Redis, but it will remain unprocessed until a worker consumes it. The browser eventually stops polling after its 90-second timeout. Note the current limitations: after the 120-second lock expires, the status endpoint reports any cached report as `COMPLETED` even though the queued job never ran, and the job itself is still processed once a worker appears.
 
 ## Redis inspection
 
@@ -255,7 +256,7 @@ Keep GitHub transport types separate from the UI-facing processed structure.
 
 ## Working on metrics
 
-Metric calculation is performed by the Go engine. The main transformation logic lives with the audit service/domain implementation.
+Metric calculation is performed by the Go engine. The main transformation lives in `go-engine/infra/github_client.go` (`FetchUserStats`); the GraphQL request structures live in `go-engine/domain/github.go`.
 
 When adding a metric, document:
 
@@ -265,7 +266,7 @@ When adding a metric, document:
 - its units and rounding rules; and
 - any pagination or result-window limitation.
 
-The repository currently requests up to 50 repositories for language analysis and up to 100 pull-request nodes for state analysis.
+The repository currently requests up to 50 owned, non-fork repositories (10 language edges each) for language analysis, and paginates pull requests in batches of 100 until GitHub reports no further pages.
 
 ## Working on the dashboard
 

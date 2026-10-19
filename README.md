@@ -26,7 +26,10 @@ Browser
    v
 Next.js API
    |
-   | acquire lock + LPUSH
+   | read stats:<username>
+   |   cached + no refresh --> return report at once (no lock, no job)
+   |
+   | acquire lock + clear marker + LPUSH
    v
 Redis queue: queue:github-audit
    |
@@ -173,6 +176,7 @@ A failed audit gets a temporary `failed:audit:<username>` marker so the browser 
 | `POST` | `/api/audit` | Serve a cached report, or explicitly enqueue an asynchronous audit job |
 | `GET` | `/api/audit/status/<username>` | Return the current audit status and completed data |
 | `GET` | `/api/wrapped/<username>` | Read completed audit data through a direct JSON endpoint |
+| `GET` | `/api/health` | Diagnostic endpoint: Redis reachability and queue/processing depth |
 
 See [`docs/API.md`](docs/API.md) for request/response contracts and status behavior.
 

@@ -158,31 +158,41 @@ The worker pool defaults to five workers and uses bounded reconnect backoff when
 
 ### 4. GitHub fetch and processing
 
-The worker calls GitHub GraphQL through `go-engine/infra/github_client.go`. The returned data is transformed into the application's `DevWrappedStats` structure and saved to Redis under:
+The worker calls GitHub GraphQL through `go-engine/infra/github_client.go`, then transforms the raw response into the `DevWrappedStats` structure and saves it to Redis under:
 
 ```text
 stats:<username>
 ```
 
-The completed report has a 24-hour TTL.
+The completed report has a 24-hour TTL. The transformation itself also lives in `go-engine/infra/github_client.go` (`FetchUserStats`); there is no separate metrics module.
+
+The GitHub client is bounded: the OAuth2 transport has a 45-second HTTP timeout, and each GraphQL fetch runs under a 30-second child context so a slow GitHub response fails the job instead of pinning a worker goroutine.
 
 ### 5. Completion and failure
 
 On success, the worker removes the user's audit lock after saving the report and clears any previous failure marker. A previously completed report stays visible as stale data while a new audit runs; the status endpoint reports `REFRESHING` in that case.
 
-On a terminal error, the worker writes:
+On a terminal error (including a panic), the worker writes:
 
 ```text
 failed:audit:<username>
 ```
 
-with a 10-minute TTL and releases the audit lock. This gives the browser an explicit terminal state instead of making it poll until the lock's 120-second TTL expires. If a previous report exists, it is returned alongside `FAILED` and is not deleted. A new accepted audit clears the failure marker so a retry cannot be reported as failed by a marker from the earlier run.
+with a 10-minute TTL and releases the audit lock. This gives the browser an explicit terminal state instead of making it poll until the lock's 120-second TTL expires. If a previous report exists, it is returned alongside `FAILED` and is not deleted. Acceptance clears the failure marker before a job is enqueued so a retry cannot be reported as failed by a marker from the earlier run.
 
 The processing-list entry is removed after the job has been handled. If a worker dies before removal, the next worker process can reclaim it during startup.
 
+Lock ownership caveats that the implementation actually has:
+
+- The lock is a plain `SET NX EX` string with no owner token. The worker releases it by username, so a job that outlives the 120-second TTL can delete a lock that a newer submission acquired. A long audit can therefore race a subsequent audit for the same handle; the later report wins because it is written later, but the earlier client may already have been told the audit completed.
+- If no worker is consuming, a queued job does not hold the audit state: after the lock TTL expires, the status endpoint reports the last cached report as `COMPLETED` even though the requested audit never ran. The job stays in the queue and may be processed much later.
+- At-least-once applies to execution, not exactly-once: a worker crash mid-job leaves the job in the processing list, and the reclaiming boot re-executes it from scratch. GitHub is re-queried and the report is simply overwritten.
+
 ## Browser polling
 
-`useAuditStatus()` polls only when a job was actually enqueued. A cache-hit submission resolves immediately with the cached report and never starts the polling loop. For a started audit, the polling interval begins at 800 ms, increases by a factor of 1.5, and is capped at 5 seconds.
+`useAuditStatus()` polls only when a job appears to have been started. A cache-hit submission resolves immediately with the cached report and normally never enters the polling loop. For a started audit, the polling interval begins at 800 ms, increases by a factor of 1.5, and is capped at 5 seconds.
+
+Implementation note: the polling effect binds when the submission begins (status `ENQUEUED`/`REFRESHING`, active username set), not after the POST confirms acceptance. So the first poll can reach the status endpoint before a slow submission response arrives. In practice the POST resolves in milliseconds — a cache hit terminates the polling effect through cleanup — and the poll schedule continues harmlessly otherwise, but the client cannot guarantee that its first status read follows an acknowledged enqueue.
 
 Polling stops when:
 
@@ -193,7 +203,7 @@ Polling stops when:
 
 `PROCESSING` and `REFRESHING` are non-terminal. During `REFRESHING`, the previous report remains on screen and the client continues polling; it does not navigate until the current audit reaches `COMPLETED`. On the dashboard route, an explicit refresh is started from the navbar and the cached dashboard stays visible; a completed refresh triggers a server-component refresh so the new report replaces the stale one. A failed refresh leaves the last successful report visible.
 
-Abort controllers and timer cleanup prevent stale polling loops when the user starts another audit or the component unmounts.
+Abort controllers and timer cleanup prevent stale polling loops when the user starts another audit, switches to a new handle, or the component unmounts. A status response that is not recognizable JSON, or one with an unexpected `status` field, does not terminate polling; the client keeps backing off until the deadline.
 
 ## GitHub data collection
 
@@ -207,39 +217,39 @@ The Go engine performs a GitHub v4 GraphQL query requesting:
 - pull-request contributions;
 - pull-request review contributions;
 - issue contributions;
-- pull requests and their states;
-- up to 50 owned, non-fork repositories; and
-- up to five largest language entries per selected repository.
+- up to 50 owned, non-fork repositories ordered by stargazers (`repositories(first: 50, ownerAffiliations: OWNER, isFork: false, orderBy: STARGAZERS DESC)`);
+- up to 10 largest language entries per selected repository (`languages(first: 10, orderBy: SIZE DESC)`); and
+- pull requests in pages of 100 with their states and repository owners, paginated while GitHub reports `hasNextPage`.
 
-The engine requires `GITHUB_TOKEN` and authenticates the GraphQL request with that token.
+The engine requires `GITHUB_TOKEN` and authenticates the GraphQL request with that token. See [`METRICS.md`](METRICS.md) for exact metric definitions and windows.
 
 ## Metric processing
 
-`processGithubMetrics()` is the central transformation layer.
+The transformation from raw GraphQL data to `DevWrappedStats` lives in `go-engine/infra/github_client.go` (`FetchUserStats`) and runs in the worker, not in the Next.js process.
 
 ### Languages
 
-Language byte sizes are merged across the selected repositories. The aggregate is sorted and reduced to the top five languages. Percentages are based on the aggregate bytes returned by GitHub.
+Language byte sizes are merged across the selected repositories into one entry per language name. The aggregate is sorted by byte size descending and kept in full (there is no top-N truncation of the language list itself); percentages are computed from the aggregate bytes returned by GitHub and truncated to one decimal place.
 
 This is a repository-language-byte metric, not a count of files, commits, or lines of code.
 
 ### Pull requests
 
-The query requests at most 100 pull-request nodes. The processor counts the returned nodes by `MERGED`, `CLOSED`, and `OPEN` state while using GitHub's `totalCount` for the overall total when available.
+Pull requests are fetched page by page (100 per page) until GitHub reports no further pages. The processor counts the returned nodes by `MERGED`, `CLOSED`, and `OPEN` state; `total` is the number of nodes returned across all pages (no `totalCount` is used).
 
-Merge rate is:
+Merge rate is computed over resolved pull requests:
 
 ```text
-merged / total * 100
+merged / (merged + closed) * 100
 ```
 
-Because the state counts are bounded by the node window while `totalCount` is not, the resulting percentage is not guaranteed to represent every matching pull request.
+truncated to one decimal place. For merges into organization-owned repositories, the worker counts the destination organization per merged pull request and sorts the breakdown by count. See [`METRICS.md`](METRICS.md).
 
 ### Streaks
 
-The contribution calendar is flattened and sorted chronologically.
+The contribution calendar is flattened in the order GitHub returns it (weeks and days).
 
-The longest streak scans forward, incrementing on active days and resetting on inactive days. The current streak scans backward from the newest day; if that day is inactive, the algorithm first steps back one day so a streak ending yesterday remains active.
+The longest streak scans forward, incrementing on active days and resetting on inactive days. The current streak is kept only when the forward run reaches the last calendar day; if the latest returned day has no contributions, the current streak is `0`. The implementation makes no allowance for a streak that ended yesterday.
 
 ## Redis state model
 
@@ -266,9 +276,21 @@ The browser-facing audit state endpoint uses these states:
 | `NOT_FOUND` | No completed stats or active audit exists |
 | `ERROR` | The status endpoint encountered an unexpected server error |
 
-The active lock takes precedence over both cached stats and a failure marker. The browser continues polling during `PROCESSING` and `REFRESHING`.
+The active lock takes precedence over both cached stats and a failure marker. All handled states are returned as HTTP `200` except `NOT_FOUND` (404) and `ERROR` (500). The browser continues polling during `PROCESSING` and `REFRESHING`; the fact that a state is HTTP `200` does not make it terminal.
 
 See [`API.md`](API.md) for the full request and response contract.
+
+## HTTP and CDN caching
+
+`src/proxy.ts` (the Next.js proxy/middleware convention in this version) sets response headers, not the applicative Redis cache:
+
+| Route family | `Cache-Control` | Behavior |
+| --- | --- | --- |
+| `/[username]` page HTML | `public, s-maxage=30, stale-while-revalidate=120` | A repeat visit within 30 s is served by a CDN/proxy without invoking the app; SWR refreshes it in the background for up to 120 s |
+| `/api/wrapped/[username]` | `public, s-maxage=30, stale-while-revalidate=60` | Same idea for the JSON envelope |
+| `/api/audit` (POST), `/api/audit/status/*`, `/api/health`, `/og` | none set by the proxy | Status reads are never cached so pollers observe live transitions; `og` is deliberately fresh for crawlers; `/` gets no header and `/favicon.ico` is excluded by the matcher |
+
+Three distinct caching layers must not be conflated: the applicative Redis cache (`stats:<username>`, 24 h), CDN/reverse-proxy caching of HTML and `/api/wrapped` responses (30 s + SWR), and browser behavior. Caveat: the proxy only sets headers; whether a CDN actually honors `s-maxage`/SWR depends on the hosting platform, which cannot be confirmed from this repository. It runs behind Render (see `metadataBase` and the Redis TLS notes) and the comment in `src/proxy.ts` documents the intended CDN semantics.
 
 ## Rendering and export
 
@@ -304,12 +326,13 @@ For local or Docker-based deployments, use `docker compose up --build` to start 
 
 ## Important implementation constraints
 
-- Repository language data is capped at 50 owned, non-fork repositories.
-- Each selected repository contributes at most five language entries.
-- Pull-request state counts are capped at 100 returned nodes.
+- Repository language data is sampled from up to 50 owned, non-fork repositories.
+- Each selected repository contributes at most 10 language entries to the aggregation.
+- Pull requests are paginated in batches of 100 until GitHub reports no further pages; the PR activity metric is not limited to a single page.
+- GitHub transport is bounded by a 45-second HTTP timeout and a 30-second per-fetch deadline.
 - Aggregate contribution counters come from GitHub's contribution fields and do not share those node limits.
 - Completed stats expire after 24 hours.
-- The audit lock expires after 120 seconds.
+- The audit lock expires after 120 seconds and carries no ownership token; release is by username.
 - Failure markers expire after 10 minutes.
-- The worker uses at-least-once processing; a job may be retried after a worker crash.
+- The worker uses at-least-once processing: a job may be re-executed after a worker crash. Exactly-once execution is not guaranteed.
 - Redis is required for the audit pipeline. Without a reachable Redis instance, requests cannot enqueue work and the worker cannot consume it.
